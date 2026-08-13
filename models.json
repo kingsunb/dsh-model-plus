@@ -60,6 +60,7 @@
       "id": "grok-4.6",
       "contextWindow": 500000,
       "maxTokens": 32000,
+      "input": ["text", "image"],
       "reasoningEfforts": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh" }
     },
     {
