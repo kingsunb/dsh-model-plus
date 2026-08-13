@@ -55,7 +55,7 @@ https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json
 
 ## 友情链接
 
-- [Linux.do 社区](https://linux.do/)
+[Linux.do 社区](https://linux.do/)
 
 ## License
 
