@@ -559,6 +559,75 @@ export function apply(ctx) {
     }
   }
 
+  async function checkUpdate() {
+    let localVersion = ''
+    try {
+      const url = await import('node:url').then((m) => m)
+      const fs = await import('node:fs').then((m) => m)
+      const path = await import('node:path').then((m) => m)
+      const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+      const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'))
+      localVersion = str(pkg.version, '')
+    } catch (_) {}
+    const registryUrl = 'https://registry.npmjs.org/@kingsunb/dsh-model-plus/latest'
+    let latestVersion = ''
+    let npmUrl = 'https://www.npmjs.com/package/@kingsunb/dsh-model-plus'
+    try {
+      // 优先用 ctx.web.fetch，不可用则回退 Node 原生 fetch
+      let text = ''
+      const web = ctx.get('web')
+      if (web && typeof web.fetch === 'function') {
+        try {
+          const result = await Promise.race([
+            web.fetch({ url: registryUrl }).then((value) => ({ kind: 'result', value: value })),
+            ctx.timer.timeout(FETCH_TIMEOUT_MS).then(() => ({ kind: 'timeout' })),
+          ])
+          if (result.kind === 'timeout') throw new Error('npm registry 请求超时')
+          const response = result.value
+          if (!response || response.statusCode < 200 || response.statusCode >= 300) throw new Error('HTTP ' + (response && response.statusCode))
+          const body = response.body
+          if (typeof body === 'string') text = body
+          else if (body && typeof body.content === 'string') text = body.content
+          else if (body && typeof body.text === 'string') text = body.text
+          else throw new Error('unsupported body')
+        } catch (e) {
+          const msg = e && (e.code || e.message) ? String(e.code || e.message) : String(e)
+          if (!/WEB_PROVIDER_UNAVAILABLE|no usable web provider|not registered|configured web provider/i.test(msg)) throw e
+          // 落到原生 fetch
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+          try {
+            const response = await fetch(registryUrl, { signal: controller.signal })
+            if (!response || !response.ok) throw new Error('HTTP ' + (response && response.status))
+            text = await response.text()
+          } finally { clearTimeout(timer) }
+        }
+      } else {
+        if (typeof fetch !== 'function') throw new Error('web 服务不可用且原生 fetch 不存在')
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+        try {
+          const response = await fetch(registryUrl, { signal: controller.signal })
+          if (!response || !response.ok) throw new Error('HTTP ' + (response && response.status))
+          text = await response.text()
+        } finally { clearTimeout(timer) }
+      }
+      const data = JSON.parse(text)
+      latestVersion = str(data.version, '')
+      if (typeof data.npmUrl === 'string') npmUrl = data.npmUrl
+    } catch (e) {
+      return { ok: false, localVersion: localVersion, latestVersion: '', hasUpdate: false, error: e instanceof Error ? e.message : String(e) }
+    }
+    return {
+      ok: true,
+      localVersion: localVersion,
+      latestVersion: latestVersion,
+      hasUpdate: !!latestVersion && !!localVersion && latestVersion !== localVersion,
+      npmUrl: npmUrl,
+      registryUrl: registryUrl,
+    }
+  }
+
   // ---- HTTP route plumbing (mirrors dsh-pet/routes.ts) ----
 
   function json(res, status, body) {
@@ -639,6 +708,7 @@ export function apply(ctx) {
       postRoute(`${API_PREFIX}/save-sync-url`, (b) => saveSyncUrl(b)),
       postRoute(`${API_PREFIX}/sync-preview`, (b) => syncPreview(b)),
       postRoute(`${API_PREFIX}/sync-apply`, (b) => syncApply(b)),
+      getRoute(`${API_PREFIX}/check-update`, () => checkUpdate()),
     ]
   }
 

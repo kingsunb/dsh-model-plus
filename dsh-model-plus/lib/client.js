@@ -54,6 +54,7 @@ window.__ModuleLoader__.load({
       saveSyncUrl: (args) => plusFetch(API + '/save-sync-url', args),
       syncPreview: (args) => plusFetch(API + '/sync-preview', args),
       syncApply: (args) => plusFetch(API + '/sync-apply', args),
+      checkUpdate: () => plusFetch(API + '/check-update'),
     };
 
     /** Idempotent <style data-plugin> injection (loader removes on unload). */
@@ -112,6 +113,9 @@ window.__ModuleLoader__.load({
       .mp-about-row code{background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16));border-radius:6px;padding:2px 6px;font-size:12px}
       .mp-link{color:var(--dsw-alias-state-business-primary);text-decoration:none;word-break:break-all}
       .mp-link:hover{text-decoration:underline}
+      .mp-version-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+      .mp-update-result{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}
+      .mp-update-new{color:var(--dsw-alias-state-business-primary);font-weight:600}
     `);
 
     function toEditor(model) {
@@ -140,6 +144,8 @@ window.__ModuleLoader__.load({
       const [syncVision, setSyncVision] = React.useState(true)
       const [syncPreview, setSyncPreview] = React.useState(null)
       const [quickResult, setQuickResult] = React.useState(null)
+      const [updateInfo, setUpdateInfo] = React.useState(null)
+      const [checking, setChecking] = React.useState(false)
 
       const loadDetail = React.useCallback(async (prov) => {
         if (!prov) { setDetail(null); setEditors({}); return }
@@ -262,6 +268,16 @@ window.__ModuleLoader__.load({
           setQuickResult({ error: e && e.message ? e.message : String(e) })
         }
         finally { setBusy(false) }
+      }
+
+      const runCheckUpdate = async () => {
+        setChecking(true); setUpdateInfo(null)
+        try {
+          setUpdateInfo(await api.checkUpdate())
+        } catch (e) {
+          setUpdateInfo({ ok: false, error: e && e.message ? e.message : String(e) })
+        }
+        finally { setChecking(false) }
       }
 
       if (loading) return React.createElement('div', { className: 'mp-root' }, React.createElement('h2', { className: 'mp-h' }, '模型 Plus'), React.createElement('p', { className: 'mp-sub' }, '加载中…'))
@@ -418,7 +434,22 @@ window.__ModuleLoader__.load({
           React.createElement('div', { className: 'mp-about-grid' },
             React.createElement('div', { className: 'mp-about-row' },
               React.createElement('span', { className: 'mp-label' }, '版本'),
-              React.createElement('span', { className: 'mp-about-val' }, (boot && boot.version) || '未知'),
+              React.createElement('div', { className: 'mp-version-line' },
+                React.createElement('span', { className: 'mp-about-val' }, (boot && boot.version) || '未知'),
+                React.createElement('button', {
+                  type: 'button', className: 'mp-btn small', disabled: checking, onClick: runCheckUpdate,
+                }, checking ? '检测中…' : '检查更新'),
+              ),
+              updateInfo && React.createElement('div', { className: 'mp-update-result' },
+                updateInfo.ok === false
+                  ? React.createElement('span', { className: 'mp-error' }, '检测失败：' + (updateInfo.error || ''))
+                  : updateInfo.hasUpdate
+                    ? React.createElement(React.Fragment, null,
+                      React.createElement('span', { className: 'mp-update-new' }, '发现新版本：' + updateInfo.latestVersion),
+                      React.createElement('a', { className: 'mp-link', href: updateInfo.npmUrl, target: '_blank', rel: 'noopener noreferrer' }, '前往 npm 查看'),
+                    )
+                    : React.createElement('span', { className: 'mp-ok' }, '已是最新版本（' + updateInfo.latestVersion + '）'),
+              ),
             ),
             React.createElement('div', { className: 'mp-about-row' },
               React.createElement('span', { className: 'mp-label' }, '包名'),
