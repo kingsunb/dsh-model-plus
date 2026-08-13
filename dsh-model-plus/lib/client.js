@@ -177,6 +177,8 @@ window.__ModuleLoader__.load({
           const editor = Object.assign({}, ed0, {
             contextWindow: ed0.contextWindow ? Number(ed0.contextWindow) : 0,
             maxTokens: ed0.maxTokens ? Number(ed0.maxTokens) : 0,
+            clearContextWindow: !ed0.contextWindow,
+            clearMaxTokens: !ed0.maxTokens,
           })
           const res = await api.saveModel({ provider: provider, modelId: id, editor: editor })
           setOkMsg(res.message || '已保存')
@@ -449,7 +451,7 @@ window.__ModuleLoader__.load({
       if (slots === undefined) return
 
       slots.inject('settings.section', () => slots.register(
-        { name: 'settings.section', id: 'thirdparty-reasoning-sync', order: 11, label: '模型 Plus' },
+        { name: 'settings.section', id: 'model-plus', order: 11, label: '模型 Plus' },
         () => React.createElement(ModelsPlusPage),
       ))
     };

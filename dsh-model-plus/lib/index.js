@@ -85,8 +85,11 @@ export function apply(ctx) {
   function cloneModel(entry) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
     const id = typeof entry.id === 'string' ? entry.id.trim() : ''
-    if (!id) return null
-    const out = { id: id }
+    const idPattern = typeof entry.idPattern === 'string' && entry.idPattern.length > 0 && entry.idPattern.length <= 200 ? entry.idPattern : ''
+    if (!id && !idPattern) return null
+    const out = {}
+    if (id) out.id = id
+    if (idPattern) out.idPattern = idPattern
     if (typeof entry.name === 'string' && entry.name) out.name = entry.name
     if (typeof entry.contextWindow === 'number' && Number.isFinite(entry.contextWindow) && entry.contextWindow > 0) out.contextWindow = Math.floor(entry.contextWindow)
     if (typeof entry.maxTokens === 'number' && Number.isFinite(entry.maxTokens) && entry.maxTokens > 0) out.maxTokens = Math.floor(entry.maxTokens)
@@ -96,6 +99,11 @@ export function apply(ctx) {
         if (typeof item === 'string' && INPUTS.indexOf(item) >= 0 && input.indexOf(item) < 0) input.push(item)
       }
       if (input.length) out.input = input
+    }
+    // vision 布尔归一化：显式 input 数组优先，否则用 vision 推导
+    if (!out.input) {
+      if (entry.vision === true) out.input = ['text', 'image']
+      else if (entry.vision === false) out.input = ['text']
     }
     if (entry.reasoningEfforts === false) out.reasoningEfforts = false
     else if (entry.reasoningEfforts && typeof entry.reasoningEfforts === 'object' && !Array.isArray(entry.reasoningEfforts)) {
@@ -291,7 +299,14 @@ export function apply(ctx) {
 
   function matchRemoteModel(remoteModels, localId) {
     const id = String(localId || '')
-    return (remoteModels || []).find((m) => m && typeof m.id === 'string' && m.id === id) || null
+    for (const m of (remoteModels || [])) {
+      if (!m) continue
+      if (typeof m.id === 'string' && m.id === id) return m
+      if (typeof m.idPattern === 'string' && m.idPattern) {
+        try { if (new RegExp(m.idPattern).test(id)) return m } catch (_) {}
+      }
+    }
+    return null
   }
 
   function setInput(model, input) {
@@ -311,9 +326,13 @@ export function apply(ctx) {
       }
     } else if (remote.reasoningEfforts && typeof remote.reasoningEfforts === 'object') {
       if (overwrite || !hasReasoning) {
-        next.reasoningEfforts = Object.assign({}, remote.reasoningEfforts)
-        changed = true
-        notes.push('推理档')
+        const before = JSON.stringify(next.reasoningEfforts ?? null)
+        const after = JSON.stringify(remote.reasoningEfforts)
+        if (before !== after) {
+          next.reasoningEfforts = Object.assign({}, remote.reasoningEfforts)
+          changed = true
+          notes.push('推理档')
+        }
       }
     }
     if (syncInput && Array.isArray(remote.input) && remote.input.length) {
@@ -424,7 +443,6 @@ export function apply(ctx) {
       modelsUrl: str(plus.modelsUrl, '') || str(plus.indexUrl, DEFAULT_MODELS_URL) || DEFAULT_MODELS_URL,
       note: '远程 models.json 仅按精确模型 id 同步推理档、输入类型和 token 限额；本地可按供应商编辑。默认 kingsunb/dsh-model-plus/models.json',
       repo: 'https://github.com/kingsunb/dsh-model-plus',
-      hostProto: hostProto ? 'ok' : 'null-proto-fallback',
     }
   }
 
@@ -469,6 +487,7 @@ export function apply(ctx) {
 
   async function saveSyncUrl(args) {
     const modelsUrl = str(args && args.modelsUrl, '') || str(args && args.indexUrl, DEFAULT_MODELS_URL) || DEFAULT_MODELS_URL
+    validateModelsUrl(modelsUrl) // 提前校验，避免坏地址落盘后延迟到同步才报错
     await savePlusPrefs({ modelsUrl: modelsUrl, indexUrl: modelsUrl })
     return { ok: true, modelsUrl: modelsUrl, indexUrl: modelsUrl, message: '已保存同步地址' }
   }
@@ -547,6 +566,14 @@ export function apply(ctx) {
       kind: 'exact', path,
       handler: (req, res) => {
         if (req.method !== 'POST') { json(res, 405, { ok: false, error: 'method-not-allowed' }); return }
+        // CSRF defense: reject cross-origin browser requests (curl/no-Origin is allowed)
+        const origin = req.headers.origin
+        if (origin) {
+          const host = req.headers.host
+          if (host && !origin.endsWith(host)) {
+            json(res, 403, { ok: false, error: 'cross-origin denied' }); return
+          }
+        }
         readJsonBody(req).then(
           (body) => {
             const record = (typeof body === 'object' && body !== null) ? body : {}
