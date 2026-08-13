@@ -131,6 +131,11 @@ export function apply(ctx) {
     if (m.reasoningEfforts === false) return '关闭'
     if (m.reasoningEfforts && typeof m.reasoningEfforts === 'object') {
       const keys = Object.keys(m.reasoningEfforts)
+      if (!keys.length) return '未设置'
+      // 按 LEVELS 顺序取最高档（off 不算），用于摘要简显
+      const positive = LEVELS.filter((l) => l !== 'off' && Object.prototype.hasOwnProperty.call(m.reasoningEfforts, l))
+      if (positive.length) return positive[positive.length - 1]
+      if (Object.prototype.hasOwnProperty.call(m.reasoningEfforts, 'off')) return '关闭'
       return keys.length ? keys.join(', ') : '未设置'
     }
     return '未设置'
