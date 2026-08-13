@@ -182,6 +182,7 @@ return {
         React.createElement('div', { className: 'mp-card' },
           React.createElement('div', { className: 'mp-tabs' },
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'models' ? '1' : '0', onClick: () => setTab('models') }, '模型与强度'),
+            React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'context' ? '1' : '0', onClick: () => setTab('context') }, '上下文'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'sync' ? '1' : '0', onClick: () => setTab('sync') }, '同步设置'),
           ),
           React.createElement('div', { className: 'mp-row' },
@@ -203,6 +204,47 @@ return {
           ),
           error && React.createElement('p', { className: 'mp-error' }, error),
           okMsg && React.createElement('p', { className: 'mp-ok' }, okMsg),
+        ),
+
+        tab === 'context' && React.createElement('div', { className: 'mp-card' },
+          React.createElement('p', { className: 'mp-sub', style: { margin: 0 } },
+            '编辑当前供应商各模型的上下文窗口和默认输出上限。保存后写入对应模型，不会创建 compat。',
+          ),
+          !models.length
+            ? React.createElement('p', { className: 'mp-sub' }, '当前供应商没有可编辑模型。')
+            : React.createElement('table', { className: 'mp-table' },
+                React.createElement('thead', null, React.createElement('tr', null,
+                  React.createElement('th', null, '模型'),
+                  React.createElement('th', null, 'contextWindow'),
+                  React.createElement('th', null, 'maxTokens'),
+                  React.createElement('th', null, '操作'),
+                )),
+                React.createElement('tbody', null, models.map((m) => {
+                  const ed = editors[m.id] || toEditor(m)
+                  return React.createElement('tr', { key: m.id },
+                    React.createElement('td', null,
+                      React.createElement('strong', null, m.id),
+                      React.createElement('div', { className: 'mp-muted' }, m.name || ''),
+                    ),
+                    React.createElement('td', null, React.createElement('input', {
+                      className: 'mp-input', type: 'number', min: 1, step: 1,
+                      value: ed.contextWindow || '', disabled: busy,
+                      placeholder: '例如 500000',
+                      onChange: (ev) => patchEditor(m.id, { contextWindow: ev.target.value }),
+                    })),
+                    React.createElement('td', null, React.createElement('input', {
+                      className: 'mp-input', type: 'number', min: 1, step: 1,
+                      value: ed.maxTokens || '', disabled: busy,
+                      placeholder: '例如 128000',
+                      onChange: (ev) => patchEditor(m.id, { maxTokens: ev.target.value }),
+                    })),
+                    React.createElement('td', null, React.createElement('button', {
+                      type: 'button', className: 'mp-btn small primary', disabled: busy,
+                      onClick: () => saveModel(m.id),
+                    }, '保存')),
+                  )
+                })),
+              ),
         ),
 
         tab === 'sync' && React.createElement('div', { className: 'mp-card' },

@@ -18,6 +18,13 @@
           "name": { "type": "string" },
           "thinkingFormat": { "type": "string" },
           "vision": { "type": "boolean" },
+          "contextWindow": { "type": "integer", "minimum": 1 },
+          "maxTokens": { "type": "integer", "minimum": 1 },
+          "input": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["text", "image"] },
+            "uniqueItems": true
+          },
           "reasoningEfforts": {
             "oneOf": [
               { "const": false },

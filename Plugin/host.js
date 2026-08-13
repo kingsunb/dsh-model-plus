@@ -159,12 +159,9 @@ return {
       refreshHostProto()
       const errors = []
       const profileNow = asObject(asObject(readPiAi().providers)[provider])
-      const routeFormat = (profileNow.compat && typeof profileNow.compat.thinkingFormat === 'string') ? profileNow.compat.thinkingFormat : 'openai'
-      const needCompat = models.some((m) => m.reasoningEfforts && m.reasoningEfforts !== false)
 
       try {
         const providerPatch = { models: models }
-        if (needCompat) providerPatch.compat = { thinkingFormat: routeFormat || 'openai', supportsReasoningEffort: true }
         await ctx.settings.update(NS, H({ providers: { [provider]: providerPatch } }))
         return 'update'
       } catch (e) { errors.push('update:' + (e && e.message ? e.message : String(e))) }
@@ -179,12 +176,6 @@ return {
           baseURL: prev.baseURL || profileNow.baseURL,
           models: models,
         })
-        if (needCompat) {
-          nextProfile.compat = Object.assign({}, prev.compat || {}, {
-            thinkingFormat: (prev.compat && prev.compat.thinkingFormat) || routeFormat || 'openai',
-            supportsReasoningEffort: true,
-          })
-        }
         user.providers[provider] = nextProfile
         await ctx.settings.replace(NS, H(user))
         return 'replace'
@@ -196,12 +187,6 @@ return {
         op1.op = 'set'
         op1.path = ['providers', String(provider), 'models']
         ops.push(op1)
-        if (needCompat) {
-          const op2 = H({ op: 'set', path: ['providers', provider, 'compat'], value: { thinkingFormat: routeFormat || 'openai', supportsReasoningEffort: true } })
-          op2.op = 'set'
-          op2.path = ['providers', String(provider), 'compat']
-          ops.push(op2)
-        }
         await ctx.settings.mutate(NS, ops)
         return 'mutate'
       } catch (e) { errors.push('mutate:' + (e && e.message ? e.message : String(e))) }
@@ -274,17 +259,6 @@ return {
           changed = true
           notes.push('推理档')
         }
-      }
-      if (typeof remote.thinkingFormat === 'string' && remote.thinkingFormat) {
-        const c = next.compat && typeof next.compat === 'object' ? Object.assign({}, next.compat) : {}
-        if (overwrite || !c.thinkingFormat) {
-          if (c.thinkingFormat !== remote.thinkingFormat) { c.thinkingFormat = remote.thinkingFormat; changed = true; notes.push('方言') }
-        }
-        if (next.reasoningEfforts && next.reasoningEfforts !== false) c.supportsReasoningEffort = true
-        next.compat = c
-      } else if (next.reasoningEfforts && next.reasoningEfforts !== false) {
-        const c = next.compat && typeof next.compat === 'object' ? Object.assign({}, next.compat) : {}
-        if (c.supportsReasoningEffort !== true) { c.supportsReasoningEffort = true; next.compat = c; changed = true }
       }
       if (syncVision && typeof remote.vision === 'boolean') {
         const before = hasVision(next)
