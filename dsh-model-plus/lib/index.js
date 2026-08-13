@@ -12,12 +12,6 @@
  * @module @kingsunb/dsh-model-plus
  */
 
-import { lookup as dnsLookup } from 'node:dns/promises'
-import { request as httpRequest } from 'node:http'
-import { request as httpsRequest } from 'node:https'
-import { isIP } from 'node:net'
-import { connect as tlsConnect } from 'node:tls'
-
 /**
  * Host-side route handler signature: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>.
  * WebRoute shape: { kind: 'exact'|'prefix', path: string, handler } from @deepseek-ai/dsh-host-webserver.
@@ -82,14 +76,6 @@ function sameOriginHost(origin, host) {
   }
 }
 
-function isSameOriginPost(req) {
-  const site = req.headers['sec-fetch-site']
-  if (typeof site === 'string' && (site === 'cross-site' || site === 'same-site')) return false
-  const origin = req.headers.origin
-  const host = req.headers.host
-  return typeof origin === 'string' && typeof host === 'string' && sameOriginHost(origin, host)
-}
-
 function routeError(error) {
   const message = error instanceof Error ? error.message : String(error)
   return message
@@ -102,15 +88,18 @@ function isSafeIdPattern(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_MODEL_PATTERN_LENGTH && /^[A-Za-z0-9._:/@+~?*\-]+$/.test(value)
 }
 
-/** Linear-time glob matcher for remote model ids; '*' matches any run, '?' one character. */
+/** Linear-time glob matcher for remote model ids; '*' matches any run, '?' one character.
+ *  大小写不敏感：value 先转小写再匹配（与精确 id 匹配的 toLowerCase 一致）。 */
 function matchIdPattern(pattern, value) {
+  const pat = pattern.toLowerCase()
+  const lower = value.toLowerCase()
   let patternIndex = 0
   let valueIndex = 0
   let starIndex = -1
   let starValueIndex = 0
-  while (valueIndex < value.length) {
-    const patternChar = pattern[patternIndex]
-    if (patternChar === value[valueIndex] || patternChar === '?') {
+  while (valueIndex < lower.length) {
+    const patternChar = pat[patternIndex]
+    if (patternChar === lower[valueIndex] || patternChar === '?') {
       patternIndex += 1
       valueIndex += 1
     } else if (patternChar === '*') {
@@ -125,8 +114,8 @@ function matchIdPattern(pattern, value) {
       return false
     }
   }
-  while (pattern[patternIndex] === '*') patternIndex += 1
-  return patternIndex === pattern.length
+  while (pat[patternIndex] === '*') patternIndex += 1
+  return patternIndex === pat.length
 }
 
 /**
@@ -171,7 +160,8 @@ export function apply(ctx) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
     const id = typeof entry.id === 'string' ? entry.id.trim() : ''
     const idPattern = isSafeIdPattern(entry.idPattern) ? entry.idPattern : ''
-    if ((!id || id.length > 200) && !idPattern) return null
+    if (!id && !idPattern) return null
+    if (id.length > 200) return null
     const out = {}
     if (id) out.id = id
     if (idPattern) out.idPattern = idPattern
