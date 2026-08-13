@@ -1,5 +1,5 @@
 return {
-  inject: ['llm', 'settings', 'web'],
+  inject: ['llm', 'settings'],
   apply(ctx) {
     const NS = 'llm-pi-ai'
     const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
@@ -159,9 +159,12 @@ return {
       refreshHostProto()
       const errors = []
       const profileNow = asObject(asObject(readPiAi().providers)[provider])
+      const routeFormat = (profileNow.compat && typeof profileNow.compat.thinkingFormat === 'string') ? profileNow.compat.thinkingFormat : 'openai'
+      const needCompat = models.some((m) => m.reasoningEfforts && m.reasoningEfforts !== false)
 
       try {
         const providerPatch = { models: models }
+        if (needCompat) providerPatch.compat = { thinkingFormat: routeFormat || 'openai', supportsReasoningEffort: true }
         await ctx.settings.update(NS, H({ providers: { [provider]: providerPatch } }))
         return 'update'
       } catch (e) { errors.push('update:' + (e && e.message ? e.message : String(e))) }
@@ -176,6 +179,12 @@ return {
           baseURL: prev.baseURL || profileNow.baseURL,
           models: models,
         })
+        if (needCompat) {
+          nextProfile.compat = Object.assign({}, prev.compat || {}, {
+            thinkingFormat: (prev.compat && prev.compat.thinkingFormat) || routeFormat || 'openai',
+            supportsReasoningEffort: true,
+          })
+        }
         user.providers[provider] = nextProfile
         await ctx.settings.replace(NS, H(user))
         return 'replace'
@@ -187,6 +196,12 @@ return {
         op1.op = 'set'
         op1.path = ['providers', String(provider), 'models']
         ops.push(op1)
+        if (needCompat) {
+          const op2 = H({ op: 'set', path: ['providers', provider, 'compat'], value: { thinkingFormat: routeFormat || 'openai', supportsReasoningEffort: true } })
+          op2.op = 'set'
+          op2.path = ['providers', String(provider), 'compat']
+          ops.push(op2)
+        }
         await ctx.settings.mutate(NS, ops)
         return 'mutate'
       } catch (e) { errors.push('mutate:' + (e && e.message ? e.message : String(e))) }
@@ -205,15 +220,26 @@ return {
 
     async function fetchText(url) {
       const web = ctx.get('web')
-      if (!web || typeof web.fetch !== 'function') throw new Error('web 服务不可用，无法拉取远程目录')
-      const result = await web.fetch({ url: url })
-      if (!result || result.statusCode < 200 || result.statusCode >= 300) throw new Error('HTTP ' + (result && result.statusCode) + ' for ' + url)
-      const body = result.body
-      if (typeof body === 'string') return body
-      if (body && (body.type === 'text' || body.type === 'html')) return String(body.content || body.text || '')
-      if (body && typeof body.content === 'string') return body.content
-      if (body && typeof body.text === 'string') return body.text
-      throw new Error('unsupported body from web.fetch')
+      if (web && typeof web.fetch === 'function') {
+        try {
+          const result = await web.fetch({ url: url })
+          if (result && result.statusCode >= 200 && result.statusCode < 300) {
+            const body = result.body
+            if (typeof body === 'string') return body
+            if (body && (body.kind === 'text' || body.kind === 'html' || body.type === 'text' || body.type === 'html')) {
+              return String(body.content || body.text || '')
+            }
+            if (body && typeof body.content === 'string') return body.content
+            if (body && typeof body.text === 'string') return body.text
+          }
+        } catch (e) {
+          // fall through to client fetch
+        }
+      }
+      const err = new Error('NEED_CLIENT_FETCH:' + url)
+      err.code = 'NEED_CLIENT_FETCH'
+      err.url = url
+      throw err
     }
 
     async function fetchJson(url) {
@@ -260,6 +286,17 @@ return {
           notes.push('推理档')
         }
       }
+      if (typeof remote.thinkingFormat === 'string' && remote.thinkingFormat) {
+        const c = next.compat && typeof next.compat === 'object' ? Object.assign({}, next.compat) : {}
+        if (overwrite || !c.thinkingFormat) {
+          if (c.thinkingFormat !== remote.thinkingFormat) { c.thinkingFormat = remote.thinkingFormat; changed = true; notes.push('方言') }
+        }
+        if (next.reasoningEfforts && next.reasoningEfforts !== false) c.supportsReasoningEffort = true
+        next.compat = c
+      } else if (next.reasoningEfforts && next.reasoningEfforts !== false) {
+        const c = next.compat && typeof next.compat === 'object' ? Object.assign({}, next.compat) : {}
+        if (c.supportsReasoningEffort !== true) { c.supportsReasoningEffort = true; next.compat = c; changed = true }
+      }
       if (syncVision && typeof remote.vision === 'boolean') {
         const before = hasVision(next)
         if (overwrite || next.input === undefined) {
@@ -288,7 +325,12 @@ return {
       return { model: next, changed: changed, notes: notes.join(',') }
     }
 
-    async function loadRemoteModels(modelsUrl) {
+    async function loadRemoteModels(modelsUrl, preloaded) {
+      if (preloaded && typeof preloaded === 'object') {
+        if (Array.isArray(preloaded.models)) return { catalog: preloaded, models: preloaded.models, modelsUrl: modelsUrl || '' }
+        if (Array.isArray(preloaded)) return { catalog: { models: preloaded }, models: preloaded, modelsUrl: modelsUrl || '' }
+      }
+
       const data = await fetchJson(modelsUrl)
       // Root models.json: { models: [...] }
       // Backward compatible: index with modelsFile, or inline models
@@ -312,7 +354,7 @@ return {
       const profile = asObject(asObject(readPiAi().providers)[provider])
       if (!Object.keys(profile).length) throw new Error('供应商未配置: ' + provider)
 
-      const remote = await loadRemoteModels(modelsUrl)
+      const remote = await loadRemoteModels(modelsUrl, args && (args.catalog || args.models))
       const existing = getRawModels(provider)
       const changes = []
       const nextModels = []
@@ -426,31 +468,74 @@ return {
     })
 
     harness.handle('plus-sync-preview', async (args) => {
-      const plan = await syncFromRemote(args || {})
-      return {
-        modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, indexName: plan.indexName, updatedAt: plan.updatedAt,
-        remoteRules: plan.remoteRules, localCount: plan.localCount, changeCount: plan.changeCount, changes: plan.changes,
-        overwriteEfforts: plan.overwriteEfforts, syncVision: plan.syncVision,
+      try {
+        const plan = await syncFromRemote(args || {})
+        return {
+          modelsUrl: plan.modelsUrl,
+          indexUrl: plan.modelsUrl,
+          indexName: plan.indexName,
+          updatedAt: plan.updatedAt,
+          remoteRules: plan.remoteRules,
+          localCount: plan.localCount,
+          changeCount: plan.changeCount,
+          changes: plan.changes,
+          overwriteEfforts: plan.overwriteEfforts,
+          syncVision: plan.syncVision,
+        }
+      } catch (e) {
+        const msg = e && e.message ? String(e.message) : String(e)
+        if (e && (e.code === 'NEED_CLIENT_FETCH' || msg.indexOf('NEED_CLIENT_FETCH:') === 0)) {
+          const url = e.url || msg.replace(/^NEED_CLIENT_FETCH:/, '')
+          return {
+            needClientFetch: true,
+            modelsUrl: url,
+            message: 'Host 无可用 web provider，改由浏览器拉取远程 models.json',
+          }
+        }
+        throw e
       }
     })
 
     harness.handle('plus-sync-apply', async (args) => {
       const provider = str(args && args.provider, '')
-      const plan = await syncFromRemote(args || {})
-      if (!plan.changeCount) {
-        return {
-          ok: true, skipped: true, changeCount: 0,
-          message: '远程 models.json 无匹配变更（或本地已是最新）。只按模型名匹配。',
-          modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, changes: [], localCount: plan.localCount,
+      try {
+        const plan = await syncFromRemote(args || {})
+        if (!plan.changeCount) {
+          return {
+            ok: true,
+            skipped: true,
+            changeCount: 0,
+            message: '远程 models.json 无匹配变更（或本地已是最新）。只按模型名匹配。',
+            modelsUrl: plan.modelsUrl,
+            indexUrl: plan.modelsUrl,
+            changes: [],
+            localCount: plan.localCount,
+          }
         }
-      }
-      const via = await writeModels(provider, plan.nextModels)
-      await savePlusPrefs({ modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, lastSyncAt: Date.now() })
-      return {
-        ok: true, skipped: false, changeCount: plan.changeCount,
-        message: '已按模型名从 models.json 写回 ' + plan.changeCount + ' 项（via ' + via + '）。',
-        modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, changes: plan.changes, localCount: plan.localCount,
-        models: plan.nextModels.map(modelView),
+        const via = await writeModels(provider, plan.nextModels)
+        await savePlusPrefs({ modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, lastSyncAt: Date.now() })
+        return {
+          ok: true,
+          skipped: false,
+          changeCount: plan.changeCount,
+          message: '已按模型名从 models.json 写回 ' + plan.changeCount + ' 项（via ' + via + '）。',
+          modelsUrl: plan.modelsUrl,
+          indexUrl: plan.modelsUrl,
+          changes: plan.changes,
+          localCount: plan.localCount,
+          models: plan.nextModels.map(modelView),
+        }
+      } catch (e) {
+        const msg = e && e.message ? String(e.message) : String(e)
+        if (e && (e.code === 'NEED_CLIENT_FETCH' || msg.indexOf('NEED_CLIENT_FETCH:') === 0)) {
+          const url = e.url || msg.replace(/^NEED_CLIENT_FETCH:/, '')
+          return {
+            needClientFetch: true,
+            modelsUrl: url,
+            message: 'Host 无可用 web provider，改由浏览器拉取远程 models.json 后再写回',
+          }
+        }
+        throw e
       }
     })
   },
