@@ -93,6 +93,8 @@ return {
         id: m.id, name: str(m.name, ''), disabled: m.reasoningEfforts === false, vision: hasVision(m),
         levels: levels, summary: effortSummary(m), hasEffort: !!(effortsObj && Object.keys(effortsObj).length),
         input: Array.isArray(m.input) ? m.input.slice() : [],
+        contextWindow: typeof m.contextWindow === 'number' ? m.contextWindow : 0,
+        maxTokens: typeof m.maxTokens === 'number' ? m.maxTokens : 0,
       }
     }
 
@@ -121,7 +123,9 @@ return {
     function normalizeEditor(editor) {
       if (!editor || typeof editor !== 'object') throw new Error('无效编辑数据')
       const vision = editor.vision === true
-      if (editor.disabled === true) return { reasoningEfforts: false, vision: vision }
+      const contextWindow = (typeof editor.contextWindow === 'number' && editor.contextWindow > 0) ? Math.floor(editor.contextWindow) : 0
+      const maxTokens = (typeof editor.maxTokens === 'number' && editor.maxTokens > 0) ? Math.floor(editor.maxTokens) : 0
+      if (editor.disabled === true) return { reasoningEfforts: false, vision: vision, contextWindow: contextWindow, maxTokens: maxTokens }
       const efforts = {}
       let positive = 0
       for (const row of (Array.isArray(editor.levels) ? editor.levels : [])) {
@@ -136,9 +140,9 @@ return {
           if (level !== 'off') positive += 1
         }
       }
-      if (!Object.keys(efforts).length) return { reasoningEfforts: false, vision: vision }
+      if (!Object.keys(efforts).length) return { reasoningEfforts: false, vision: vision, contextWindow: contextWindow, maxTokens: maxTokens }
       if (!positive) throw new Error('至少启用一个非 off 档，或勾选关闭推理')
-      return { reasoningEfforts: efforts, vision: vision }
+      return { reasoningEfforts: efforts, vision: vision, contextWindow: contextWindow, maxTokens: maxTokens }
     }
 
     function getUserLayer() {
@@ -289,6 +293,24 @@ return {
           if (before !== remote.vision) { changed = true; notes.push(remote.vision ? '视觉开' : '视觉关') }
         }
       }
+      if (typeof remote.contextWindow === 'number' && remote.contextWindow > 0) {
+        if (overwrite || next.contextWindow === undefined) {
+          if (next.contextWindow !== remote.contextWindow) {
+            next.contextWindow = Math.floor(remote.contextWindow)
+            changed = true
+            notes.push('上下文')
+          }
+        }
+      }
+      if (typeof remote.maxTokens === 'number' && remote.maxTokens > 0) {
+        if (overwrite || next.maxTokens === undefined) {
+          if (next.maxTokens !== remote.maxTokens) {
+            next.maxTokens = Math.floor(remote.maxTokens)
+            changed = true
+            notes.push('maxTokens')
+          }
+        }
+      }
       return { model: next, changed: changed, notes: notes.join(',') }
     }
 
@@ -327,6 +349,7 @@ return {
         nextModels.push(applied.model)
         if (applied.changed) changes.push({
           id: m.id, notes: applied.notes, summary: effortSummary(applied.model), vision: hasVision(applied.model),
+          contextWindow: typeof applied.model.contextWindow === 'number' ? applied.model.contextWindow : 0,
           matchedBy: hit.id ? ('id:' + hit.id) : ('pattern:' + (hit.idPattern || '')),
         })
       }
@@ -358,6 +381,10 @@ return {
         next.compat = c
       }
       next = setVision(next, norm.vision === true)
+      if (norm.contextWindow > 0) next.contextWindow = norm.contextWindow
+      else delete next.contextWindow
+      if (norm.maxTokens > 0) next.maxTokens = norm.maxTokens
+      else delete next.maxTokens
       models[idx] = next
       const via = await writeModels(provider, models)
       return { ok: true, model: modelView(next), message: (messagePrefix || '已保存 ') + modelId + '（via ' + via + '）' }
@@ -373,7 +400,7 @@ return {
         providers: listProviders(),
         defaultModelsUrl: DEFAULT_MODELS_URL,
         modelsUrl: str(plus.modelsUrl, '') || str(plus.indexUrl, DEFAULT_MODELS_URL) || DEFAULT_MODELS_URL,
-        note: '远程 models.json 只按模型名匹配；本地按供应商编辑强度与视觉。默认: kingsunb/dsh-model-plus/models.json',
+        note: '远程 models.json 按模型名同步思考强度/视觉/上下文；本地可按供应商编辑。默认 kingsunb/dsh-model-plus/models.json',
         repo: 'https://github.com/kingsunb/dsh-model-plus',
         hostProto: hostProto ? 'ok' : 'null-proto-fallback',
       }

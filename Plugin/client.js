@@ -43,6 +43,8 @@ return {
       return {
         disabled: !!model.disabled,
         vision: !!model.vision,
+        contextWindow: model.contextWindow > 0 ? String(model.contextWindow) : '',
+        maxTokens: model.maxTokens > 0 ? String(model.maxTokens) : '',
         levels: (model.levels || []).map((l) => ({ level: l.level, enabled: !!l.enabled, wire: l.wire || '', wireNull: !!l.wireNull })),
       }
     }
@@ -107,7 +109,12 @@ return {
       const saveModel = async (id) => {
         setBusy(true); setError(''); setOkMsg('')
         try {
-          const res = await host.call('plus-save-model', { provider: provider, modelId: id, editor: editors[id] })
+          const ed0 = editors[id] || {}
+          const editor = Object.assign({}, ed0, {
+            contextWindow: ed0.contextWindow ? Number(ed0.contextWindow) : 0,
+            maxTokens: ed0.maxTokens ? Number(ed0.maxTokens) : 0,
+          })
+          const res = await host.call('plus-save-model', { provider: provider, modelId: id, editor: editor })
           setOkMsg(res.message || '已保存')
           await loadDetail(provider)
           setBoot(await host.call('plus-bootstrap', {}))
@@ -200,7 +207,7 @@ return {
 
         tab === 'sync' && React.createElement('div', { className: 'mp-card' },
           React.createElement('p', { className: 'mp-sub', style: { margin: 0 } },
-            '上游 models.json 只按模型名匹配。默认：' + ((boot && boot.defaultModelsUrl) || ''),
+            '上游 models.json 按模型名同步思考/视觉/上下文。默认：' + ((boot && boot.defaultModelsUrl) || ''),
           ),
           React.createElement('div', { className: 'mp-field' },
             React.createElement('span', { className: 'mp-label' }, '远程 models.json'),
@@ -233,12 +240,12 @@ return {
               ? React.createElement('p', { className: 'mp-sub' }, '没有变更。')
               : React.createElement('table', { className: 'mp-table' },
                 React.createElement('thead', null, React.createElement('tr', null,
-                  React.createElement('th', null, '模型'), React.createElement('th', null, '匹配'), React.createElement('th', null, '变更'), React.createElement('th', null, '强度/视觉'))),
+                  React.createElement('th', null, '模型'), React.createElement('th', null, '匹配'), React.createElement('th', null, '变更'), React.createElement('th', null, '强度/视觉/上下文'))),
                 React.createElement('tbody', null, syncPreview.changes.map((c) => React.createElement('tr', { key: c.id },
                   React.createElement('td', null, c.id),
                   React.createElement('td', null, c.matchedBy || ''),
                   React.createElement('td', null, c.notes || ''),
-                  React.createElement('td', null, (c.summary || '') + (c.vision ? ' · 视觉' : '')),
+                  React.createElement('td', null, (c.summary || '') + (c.vision ? ' · 视觉' : '') + (c.contextWindow ? (' · ctx ' + c.contextWindow) : '')),
                 ))),
               ),
           ),
@@ -251,7 +258,7 @@ return {
             React.createElement('div', { className: 'mp-head' },
               React.createElement('div', null,
                 React.createElement('strong', null, m.id),
-                React.createElement('div', { className: 'mp-muted' }, '强度: ' + (m.summary || '未设置') + (m.vision ? ' · 视觉' : ' · 纯文本')),
+                React.createElement('div', { className: 'mp-muted' }, '强度: ' + (m.summary || '未设置') + (m.vision ? ' · 视觉' : ' · 纯文本') + (m.contextWindow ? (' · ctx ' + m.contextWindow) : '') + (m.maxTokens ? (' · maxOut ' + m.maxTokens) : '')),
               ),
               React.createElement('div', { className: 'mp-actions' },
                 React.createElement('span', { className: 'mp-pill' }, m.hasEffort ? '已配置' : (m.disabled ? '已关闭' : '未配置')),
@@ -274,6 +281,28 @@ return {
               React.createElement('label', { className: 'mp-checkline' },
                 React.createElement('input', { type: 'checkbox', checked: !!ed.vision, disabled: busy, onChange: (ev) => patchEditor(m.id, { vision: !!ev.target.checked }) }),
                 React.createElement('span', null, '支持视觉（input: text + image）'),
+              ),
+              React.createElement('div', { className: 'mp-row' },
+                React.createElement('div', { className: 'mp-field' },
+                  React.createElement('span', { className: 'mp-label' }, '上下文长度 contextWindow'),
+                  React.createElement('input', {
+                    className: 'mp-input',
+                    value: ed.contextWindow || '',
+                    disabled: busy,
+                    placeholder: '例如 128000，空=不设置',
+                    onChange: (ev) => patchEditor(m.id, { contextWindow: ev.target.value }),
+                  }),
+                ),
+                React.createElement('div', { className: 'mp-field' },
+                  React.createElement('span', { className: 'mp-label' }, '默认输出上限 maxTokens'),
+                  React.createElement('input', {
+                    className: 'mp-input',
+                    value: ed.maxTokens || '',
+                    disabled: busy,
+                    placeholder: '可选',
+                    onChange: (ev) => patchEditor(m.id, { maxTokens: ev.target.value }),
+                  }),
+                ),
               ),
               !ed.disabled && React.createElement('div', { className: 'mp-levels' },
                 (ed.levels || []).map((row) => React.createElement('div', {
