@@ -1,6 +1,6 @@
 {
   "name": "@kingsunb/dsh-model-plus",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DSH Web 插件：本地按供应商编辑模型思考强度/视觉/上下文，远程按模型名从 models.json 同步默认配置。",
   "type": "module",
   "main": "lib/index.js",

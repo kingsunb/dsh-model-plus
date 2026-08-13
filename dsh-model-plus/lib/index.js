@@ -272,24 +272,42 @@ export function apply(ctx) {
 
   async function fetchText(url) {
     const safeUrl = validateModelsUrl(url)
+    // 优先用 ctx.web（如果有 fetch provider 注册）；否则回退到 Node 原生 fetch
     const web = ctx.get('web')
-    if (!web || typeof web.fetch !== 'function') throw new Error('web 服务不可用，无法拉取远程目录')
-    const result = await Promise.race([
-      web.fetch({ url: safeUrl }).then((value) => ({ kind: 'result', value: value })),
-      ctx.timer.timeout(FETCH_TIMEOUT_MS).then(() => ({ kind: 'timeout' })),
-    ])
-    if (result.kind === 'timeout') throw new Error('远程目录请求超时（' + FETCH_TIMEOUT_MS + 'ms）')
-    const response = result.value
-    if (!response || response.statusCode < 200 || response.statusCode >= 300) throw new Error('HTTP ' + (response && response.statusCode) + ' for ' + safeUrl)
-    const body = response.body
-    let text = ''
-    if (typeof body === 'string') text = body
-    else if (body && (body.type === 'text' || body.type === 'html')) text = String(body.content || body.text || '')
-    else if (body && typeof body.content === 'string') text = body.content
-    else if (body && typeof body.text === 'string') text = body.text
-    else throw new Error('unsupported body from web.fetch')
-    if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) throw new Error('远程目录超过 2 MiB 限制')
-    return text
+    if (web && typeof web.fetch === 'function') {
+      const result = await Promise.race([
+        web.fetch({ url: safeUrl }).then((value) => ({ kind: 'result', value: value })),
+        ctx.timer.timeout(FETCH_TIMEOUT_MS).then(() => ({ kind: 'timeout' })),
+      ])
+      if (result.kind === 'timeout') throw new Error('远程目录请求超时（' + FETCH_TIMEOUT_MS + 'ms）')
+      const response = result.value
+      if (!response || response.statusCode < 200 || response.statusCode >= 300) throw new Error('HTTP ' + (response && response.statusCode) + ' for ' + safeUrl)
+      const body = response.body
+      let text = ''
+      if (typeof body === 'string') text = body
+      else if (body && (body.type === 'text' || body.type === 'html')) text = String(body.content || body.text || '')
+      else if (body && typeof body.content === 'string') text = body.content
+      else if (body && typeof body.text === 'string') text = body.text
+      else throw new Error('unsupported body from web.fetch')
+      if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) throw new Error('远程目录超过 2 MiB 限制')
+      return text
+    }
+    // 回退：Node.js 原生 fetch（Node 18+ 内置）
+    if (typeof fetch !== 'function') throw new Error('web 服务不可用且原生 fetch 不存在，无法拉取远程目录')
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+      const response = await fetch(safeUrl, { signal: controller.signal })
+      if (!response || !response.ok) throw new Error('HTTP ' + (response && response.status) + ' for ' + safeUrl)
+      const text = await response.text()
+      if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) throw new Error('远程目录超过 2 MiB 限制')
+      return text
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('远程目录请求超时（' + FETCH_TIMEOUT_MS + 'ms）')
+      throw e
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async function fetchJson(url) {
