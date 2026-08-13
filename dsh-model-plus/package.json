@@ -1,0 +1,61 @@
+{
+  "name": "@kingsunb/dsh-model-plus",
+  "version": "0.1.0",
+  "description": "DSH Web 插件：本地按供应商编辑模型思考强度/视觉/上下文，远程按模型名从 models.json 同步默认配置。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "node scripts/build.mjs"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.js.map",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kingsunb/dsh-model-plus.git"
+  },
+  "homepage": "https://github.com/kingsunb/dsh-model-plus#readme",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-web": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": false },
+    "@deepseek-ai/dsh-settings": { "optional": false },
+    "@deepseek-ai/dsh-host-webserver": { "optional": false },
+    "@deepseek-ai/dsh-web": { "optional": false },
+    "@deepseek-ai/dsh-client-ui-settings": { "optional": false },
+    "react": { "optional": false }
+  }
+}

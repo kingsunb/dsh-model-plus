@@ -1,0 +1,5 @@
+# dsh-model-plus bundle patch: 把插件行插入 web profile 的 cordis 层。
+# 安装：`dsh plugin --profile web add @kingsunb/dsh-model-plus`
+- insert:
+    - id: model-plus
+      name: '@kingsunb/dsh-model-plus'

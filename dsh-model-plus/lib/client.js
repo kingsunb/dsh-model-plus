@@ -1,10 +1,74 @@
-return {
-  inject: ['timer'],
-  apply(ctx) {
-    const slots = ctx.get('slots')
-    if (slots === undefined) return
+/**
+ * dsh-model-plus browser half — registers the「模型 Plus」settings page.
+ *
+ * 通过 `settings.section` slot 在设置页注册「模型 Plus」分区，用户可本地按
+ * 供应商编辑模型思考强度/视觉/上下文，并从远程 models.json 按模型名同步。
+ *
+ * 本文件是 DSH client bundle 形态：window.__ModuleLoader__.load 工厂。
+ * - React 通过 require('react') 从 loader 模块表解析（平台种子模块）。
+ * - host 通信走同源 fetch('/api/plus/*')（host 半 lib/index.js 注册的端点）。
+ * - 样式运行时注入 <style data-plugin>（卸载时 loader 自动移除）。
+ *
+ * 改造自创造模式动态插件（Plugin/client.js）：
+ * - 裸 React → require('react')
+ * - host.call(name, args) → fetch('/api/plus/<endpoint>')
+ * - styles.insert(css) → 运行时 <style data-plugin> 注入
+ * @module @kingsunb/dsh-model-plus/client
+ */
+window.__ModuleLoader__.load({
+  id: '@kingsunb/dsh-model-plus',
+  factory: (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
 
-    styles.insert(`
+    const React = require('react');
+
+    const API = '/api/plus';
+
+    /** Same-origin JSON fetch helper (GET without body, POST with JSON body). */
+    async function plusFetch(path, body) {
+      const response = await fetch(path, body === undefined
+        ? {}
+        : {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+      if (!response.ok) {
+        let msg = 'plus ' + path + ' failed: ' + response.status;
+        try {
+          const data = await response.json();
+          if (data && data.error) msg = data.error;
+        } catch (_) {}
+        throw new Error(msg);
+      }
+      return await response.json();
+    }
+
+    /** The host model-plus API as the browser sees it. */
+    const api = {
+      bootstrap: () => plusFetch(API + '/bootstrap'),
+      listModels: (provider) => plusFetch(API + '/list-models?provider=' + encodeURIComponent(provider)),
+      saveModel: (args) => plusFetch(API + '/save-model', args),
+      applyPreset: (args) => plusFetch(API + '/apply-preset', args),
+      saveSyncUrl: (args) => plusFetch(API + '/save-sync-url', args),
+      syncPreview: (args) => plusFetch(API + '/sync-preview', args),
+      syncApply: (args) => plusFetch(API + '/sync-apply', args),
+    };
+
+    /** Idempotent <style data-plugin> injection (loader removes on unload). */
+    const PLUGIN_CSS_ID = '@kingsunb/dsh-model-plus/styles';
+    function insertStyles(css) {
+      if (typeof document === 'undefined') return;
+      if (document.querySelector('style[data-plugin-css=' + JSON.stringify(PLUGIN_CSS_ID) + ']')) return;
+      const tag = document.createElement('style');
+      tag.dataset.plugin = '@kingsunb/dsh-model-plus';
+      tag.dataset.pluginCss = PLUGIN_CSS_ID;
+      tag.textContent = css;
+      document.head.appendChild(tag);
+    }
+
+    insertStyles(`
       .mp-root{display:flex;flex-direction:column;gap:14px;max-width:920px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-sm-14)}
       .mp-h{margin:0;font:var(--dsw-font-md-16);font-weight:600}
       .mp-sub{margin:0;color:var(--dsw-alias-label-secondary);line-height:1.55}
@@ -37,7 +101,7 @@ return {
       .mp-table th,.mp-table td{border-top:1px solid var(--dsw-alias-border-l2);padding:8px 6px;text-align:left;vertical-align:top}
       .mp-table th{color:var(--dsw-alias-label-secondary);font-weight:500}
       .mp-prov{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px 12px}
-    `)
+    `);
 
     function toEditor(model) {
       return {
@@ -46,7 +110,7 @@ return {
         contextWindow: model.contextWindow > 0 ? String(model.contextWindow) : '',
         maxTokens: model.maxTokens > 0 ? String(model.maxTokens) : '',
         levels: (model.levels || []).map((l) => ({ level: l.level, enabled: !!l.enabled, wire: l.wire || '', wireNull: !!l.wireNull })),
-      }
+      };
     }
 
     function ModelsPlusPage() {
@@ -67,7 +131,7 @@ return {
 
       const loadDetail = React.useCallback(async (prov) => {
         if (!prov) { setDetail(null); setEditors({}); return }
-        const res = await host.call('plus-list-models', { provider: prov })
+        const res = await api.listModels(prov)
         setDetail(res)
         const map = {}
         for (const m of (res.models || [])) map[m.id] = toEditor(m)
@@ -77,7 +141,7 @@ return {
       const reload = React.useCallback(async () => {
         setLoading(true); setError('')
         try {
-          const b = await host.call('plus-bootstrap', {})
+          const b = await api.bootstrap()
           setBoot(b)
           setModelsUrl(b.modelsUrl || b.defaultModelsUrl || '')
           const rows = b.providers || []
@@ -114,10 +178,10 @@ return {
             contextWindow: ed0.contextWindow ? Number(ed0.contextWindow) : 0,
             maxTokens: ed0.maxTokens ? Number(ed0.maxTokens) : 0,
           })
-          const res = await host.call('plus-save-model', { provider: provider, modelId: id, editor: editor })
+          const res = await api.saveModel({ provider: provider, modelId: id, editor: editor })
           setOkMsg(res.message || '已保存')
           await loadDetail(provider)
-          setBoot(await host.call('plus-bootstrap', {}))
+          setBoot(await api.bootstrap())
         } catch (e) { setError(e && e.message ? e.message : String(e)) }
         finally { setBusy(false) }
       }
@@ -125,11 +189,11 @@ return {
       const applyPreset = async (id, presetId) => {
         setBusy(true); setError(''); setOkMsg('')
         try {
-          const res = await host.call('plus-apply-preset', { provider: provider, modelId: id, presetId: presetId })
+          const res = await api.applyPreset({ provider: provider, modelId: id, presetId: presetId })
           setOkMsg(res.message || '已应用预设')
           await loadDetail(provider)
           setOpenId(id)
-          setBoot(await host.call('plus-bootstrap', {}))
+          setBoot(await api.bootstrap())
         } catch (e) { setError(e && e.message ? e.message : String(e)) }
         finally { setBusy(false) }
       }
@@ -137,45 +201,19 @@ return {
       const saveUrl = async () => {
         setBusy(true); setError(''); setOkMsg('')
         try {
-          const res = await host.call('plus-save-sync-url', { modelsUrl: modelsUrl, indexUrl: modelsUrl })
+          const res = await api.saveSyncUrl({ modelsUrl: modelsUrl, indexUrl: modelsUrl })
           setOkMsg(res.message || '已保存地址')
-          setBoot(await host.call('plus-bootstrap', {}))
+          setBoot(await api.bootstrap())
         } catch (e) { setError(e && e.message ? e.message : String(e)) }
         finally { setBusy(false) }
-      }
-
-      const browserFetchJson = async (url) => {
-        const res = await fetch(url, { method: 'GET', mode: 'cors', cache: 'no-store' })
-        if (!res.ok) throw new Error('浏览器拉取失败 HTTP ' + res.status + ' ' + url)
-        return await res.json()
-      }
-
-      const runSyncWithCatalog = async (apply) => {
-        const baseArgs = {
-          provider: provider,
-          modelsUrl: modelsUrl,
-          indexUrl: modelsUrl,
-          overwriteEfforts: overwriteEfforts,
-          syncVision: syncVision,
-        }
-        let res = await host.call(apply ? 'plus-sync-apply' : 'plus-sync-preview', baseArgs)
-        if (res && res.needClientFetch) {
-          const url = res.modelsUrl || modelsUrl
-          const catalog = await browserFetchJson(url)
-          res = await host.call(
-            apply ? 'plus-sync-apply' : 'plus-sync-preview',
-            Object.assign({}, baseArgs, { catalog: catalog, modelsUrl: url }),
-          )
-        }
-        return res
       }
 
       const runSyncPreview = async () => {
         setBusy(true); setError(''); setOkMsg(''); setSyncPreview(null)
         try {
-          const res = await runSyncWithCatalog(false)
-          if (res && res.needClientFetch) throw new Error(res.message || '需要浏览器拉取远程目录')
-          setSyncPreview(res)
+          setSyncPreview(await api.syncPreview({
+            provider: provider, modelsUrl: modelsUrl, indexUrl: modelsUrl, overwriteEfforts: overwriteEfforts, syncVision: syncVision,
+          }))
         } catch (e) { setError(e && e.message ? e.message : String(e)) }
         finally { setBusy(false) }
       }
@@ -183,12 +221,13 @@ return {
       const runSyncApply = async () => {
         setBusy(true); setError(''); setOkMsg('')
         try {
-          const res = await runSyncWithCatalog(true)
-          if (res && res.needClientFetch) throw new Error(res.message || '需要浏览器拉取远程目录')
+          const res = await api.syncApply({
+            provider: provider, modelsUrl: modelsUrl, indexUrl: modelsUrl, overwriteEfforts: overwriteEfforts, syncVision: syncVision,
+          })
           setOkMsg(res.message || '已同步')
           setSyncPreview(res)
           await loadDetail(provider)
-          setBoot(await host.call('plus-bootstrap', {}))
+          setBoot(await api.bootstrap())
         } catch (e) { setError(e && e.message ? e.message : String(e)) }
         finally { setBusy(false) }
       }
@@ -207,6 +246,7 @@ return {
         React.createElement('div', { className: 'mp-card' },
           React.createElement('div', { className: 'mp-tabs' },
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'models' ? '1' : '0', onClick: () => setTab('models') }, '模型与强度'),
+            React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'context' ? '1' : '0', onClick: () => setTab('context') }, '上下文'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'sync' ? '1' : '0', onClick: () => setTab('sync') }, '同步设置'),
           ),
           React.createElement('div', { className: 'mp-row' },
@@ -228,6 +268,47 @@ return {
           ),
           error && React.createElement('p', { className: 'mp-error' }, error),
           okMsg && React.createElement('p', { className: 'mp-ok' }, okMsg),
+        ),
+
+        tab === 'context' && React.createElement('div', { className: 'mp-card' },
+          React.createElement('p', { className: 'mp-sub', style: { margin: 0 } },
+            '编辑当前供应商各模型的上下文窗口和默认输出上限。保存后写入对应模型，不会创建 compat。',
+          ),
+          !models.length
+            ? React.createElement('p', { className: 'mp-sub' }, '当前供应商没有可编辑模型。')
+            : React.createElement('table', { className: 'mp-table' },
+                React.createElement('thead', null, React.createElement('tr', null,
+                  React.createElement('th', null, '模型'),
+                  React.createElement('th', null, 'contextWindow'),
+                  React.createElement('th', null, 'maxTokens'),
+                  React.createElement('th', null, '操作'),
+                )),
+                React.createElement('tbody', null, models.map((m) => {
+                  const ed = editors[m.id] || toEditor(m)
+                  return React.createElement('tr', { key: m.id },
+                    React.createElement('td', null,
+                      React.createElement('strong', null, m.id),
+                      React.createElement('div', { className: 'mp-muted' }, m.name || ''),
+                    ),
+                    React.createElement('td', null, React.createElement('input', {
+                      className: 'mp-input', type: 'number', min: 1, step: 1,
+                      value: ed.contextWindow || '', disabled: busy,
+                      placeholder: '例如 500000',
+                      onChange: (ev) => patchEditor(m.id, { contextWindow: ev.target.value }),
+                    })),
+                    React.createElement('td', null, React.createElement('input', {
+                      className: 'mp-input', type: 'number', min: 1, step: 1,
+                      value: ed.maxTokens || '', disabled: busy,
+                      placeholder: '例如 128000',
+                      onChange: (ev) => patchEditor(m.id, { maxTokens: ev.target.value }),
+                    })),
+                    React.createElement('td', null, React.createElement('button', {
+                      type: 'button', className: 'mp-btn small primary', disabled: busy,
+                      onClick: () => saveModel(m.id),
+                    }, '保存')),
+                  )
+                })),
+              ),
         ),
 
         tab === 'sync' && React.createElement('div', { className: 'mp-card' },
@@ -362,9 +443,17 @@ return {
       )
     }
 
-    slots.inject('settings.section', () => slots.register(
-      { name: 'settings.section', id: 'thirdparty-reasoning-sync', order: 11, label: '模型 Plus' },
-      () => React.createElement(ModelsPlusPage),
-    ))
+    exports.inject = ['slots'];
+    exports.apply = function apply(ctx) {
+      const slots = ctx.get('slots')
+      if (slots === undefined) return
+
+      slots.inject('settings.section', () => slots.register(
+        { name: 'settings.section', id: 'thirdparty-reasoning-sync', order: 11, label: '模型 Plus' },
+        () => React.createElement(ModelsPlusPage),
+      ))
+    };
+
+    return module.exports;
   },
-}
+});
