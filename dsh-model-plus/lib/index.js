@@ -360,7 +360,8 @@ export function apply(ctx) {
     return url
   }
 
-  function httpsGetText(url, timeoutMs) {
+  function httpsGetText(url, timeoutMs, redirectCount) {
+    if (typeof redirectCount !== 'number' || redirectCount < 0) redirectCount = 0
     return new Promise((resolve, reject) => {
       Promise.all([import('node:https'), import('node:http'), import('node:url')]).then(([https, http, urlMod]) => {
         const parsed = urlMod.parse(url)
@@ -372,10 +373,15 @@ export function apply(ctx) {
         const doRequest = (opts) => {
           const req = https.request(opts, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-              // 跟随重定向
+              // 跟随重定向：限制次数，并对目标重新做 HTTPS 校验，防止被 302 导向内网/非 HTTPS
               res.resume()
+              if (redirectCount >= MAX_REDIRECTS) {
+                reject(new Error('重定向次数超限（' + MAX_REDIRECTS + '）'))
+                return
+              }
               const redirectUrl = urlMod.resolve(url, res.headers.location)
-              httpsGetText(redirectUrl, timeoutMs).then(resolve, reject)
+              try { validateModelsUrl(redirectUrl) } catch (e) { reject(e); return }
+              httpsGetText(redirectUrl, timeoutMs, redirectCount + 1).then(resolve, reject)
               return
             }
             if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -776,7 +782,7 @@ export function apply(ctx) {
         if (req.method !== 'GET') { json(res, 405, { ok: false, error: 'method-not-allowed' }); return }
         run(req).then(
           (value) => json(res, 200, value),
-          (error) => json(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) }),
+          (error) => json(res, 500, { ok: false, error: routeError(error) }),
         )
       },
     }
@@ -801,10 +807,10 @@ export function apply(ctx) {
             const record = (typeof body === 'object' && body !== null) ? body : {}
             return run(record).then(
               (value) => json(res, 200, value),
-              (error) => json(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }),
+              (error) => json(res, 400, { ok: false, error: routeError(error) }),
             )
           },
-          (error) => json(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }),
+          (error) => json(res, 400, { ok: false, error: routeError(error) }),
         )
       },
     }
