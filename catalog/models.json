@@ -1,32 +1,36 @@
 {
-  "id": "newapi",
-  "displayName": "NewAPI / custom OpenAI-compatible gateway",
-  "defaultThinkingFormat": "openai",
+  "version": 2,
+  "name": "dsh-model-plus",
+  "updatedAt": "2026-03-22T12:00:00Z",
+  "description": "Upstream defaults matched by model id/name patterns only (not by provider).",
   "models": [
     {
-      "id": "auto",
-      "reasoningEfforts": false
+      "idPattern": "^auto$",
+      "reasoningEfforts": false,
+      "vision": false
     },
     {
-      "idPattern": "^deepseek",
+      "idPattern": "deepseek|reasoner|(^|[^a-z])r1([^a-z]|$)",
       "thinkingFormat": "deepseek",
       "reasoningEfforts": {
         "off": null,
         "low": "low",
         "medium": "medium",
         "high": "high"
-      }
+      },
+      "vision": false
     },
     {
-      "idPattern": "^grok-",
+      "idPattern": "grok",
       "thinkingFormat": "openai",
       "reasoningEfforts": {
         "low": "low",
         "high": "high"
-      }
+      },
+      "vision": true
     },
     {
-      "idPattern": "^(gpt-5|o[1-4])",
+      "idPattern": "gpt-5|chatgpt|(^|[^a-z])o[1-4]([^a-z]|$)",
       "thinkingFormat": "openai",
       "reasoningEfforts": {
         "minimal": "minimal",
@@ -34,28 +38,41 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh"
-      }
+      },
+      "vision": true
     },
     {
-      "idPattern": "^(glm|chatglm)",
+      "idPattern": "glm|chatglm",
       "thinkingFormat": "openai",
       "reasoningEfforts": {
         "off": null,
         "low": "low",
         "high": "high"
-      }
+      },
+      "vision": true
     },
     {
-      "idPattern": "^(qwen|qwq)",
+      "idPattern": "qwen|qwq",
       "thinkingFormat": "qwen",
       "reasoningEfforts": {
         "off": null,
         "low": "low",
         "high": "high"
-      }
+      },
+      "vision": true
     },
     {
-      "idPattern": "^claude",
+      "idPattern": "claude",
+      "thinkingFormat": "openai",
+      "reasoningEfforts": {
+        "low": "low",
+        "medium": "medium",
+        "high": "high"
+      },
+      "vision": true
+    },
+    {
+      "idPattern": "think|reason",
       "thinkingFormat": "openai",
       "reasoningEfforts": {
         "low": "low",

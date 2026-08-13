@@ -1,27 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "dsh-model-plus catalog index",
+  "title": "dsh-model-plus model catalog",
   "type": "object",
-  "required": ["version", "providers"],
+  "required": ["version", "models"],
   "properties": {
-    "version": { "type": "integer", "minimum": 1 },
+    "version": { "type": "integer", "minimum": 2 },
     "name": { "type": "string" },
     "updatedAt": { "type": "string" },
-    "defaultProvider": { "type": "string" },
-    "providers": {
+    "description": { "type": "string" },
+    "models": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "file"],
         "properties": {
           "id": { "type": "string" },
-          "file": { "type": "string" },
-          "match": {
-            "type": "object",
-            "properties": {
-              "providerIds": { "type": "array", "items": { "type": "string" } },
-              "baseURLContains": { "type": "array", "items": { "type": "string" } }
-            }
+          "idPattern": { "type": "string" },
+          "name": { "type": "string" },
+          "thinkingFormat": { "type": "string" },
+          "vision": { "type": "boolean" },
+          "reasoningEfforts": {
+            "oneOf": [
+              { "const": false },
+              { "type": "object", "additionalProperties": { "type": ["string", "null"] } }
+            ]
           }
         }
       }

@@ -1,24 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "dsh-model-plus",
-  "updatedAt": "2026-03-22T00:00:00Z",
-  "defaultProvider": "openai-compatible",
-  "providers": [
-    {
-      "id": "newapi",
-      "file": "providers/newapi.json",
-      "match": {
-        "providerIds": ["newapi"],
-        "baseURLContains": ["superaiapi", "newapi"]
-      }
-    },
-    {
-      "id": "openai-compatible",
-      "file": "providers/openai-compatible.json",
-      "match": {
-        "providerIds": [],
-        "baseURLContains": []
-      }
-    }
-  ]
+  "updatedAt": "2026-03-22T12:00:00Z",
+  "description": "Upstream catalog index. Defaults are matched by model name/id only.",
+  "modelsFile": "models.json"
 }
