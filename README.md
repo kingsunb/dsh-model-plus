@@ -1,41 +1,36 @@
 # dsh-model-plus
 
-DeepSeek Harness **模型 Plus** 的远程默认目录。
+DeepSeek Harness **模型 Plus** 仓库。
 
-上游只按 **模型 id / 名称模式** 提供思考强度与是否视觉的默认值，**不绑定任何供应商**（没有 newapi / openai 供应商表）。
-
-本地插件仍可按供应商逐模型覆盖，并决定是否启用视觉（`input: [text, image]`）。
-
-## 默认地址
+## 布局
 
 ```text
-https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/catalog/index.json
+models.json     # 上游默认：按模型名/id 模式的思考强度与视觉
+Plugin/         # DSH 动态插件源码
+schema/         # 可选 schema
 ```
 
-## 结构
+## 同步地址（插件默认）
 
 ```text
-catalog/
-  index.json      # 指向 models 文件
-  models.json     # 按模型名模式的默认规则
+https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json
 ```
 
-## models.json 规则
+上游 **只按模型名称/id 模式** 提供默认值，不包含 newapi 等供应商表。  
+本地插件仍按供应商逐模型覆盖，并可开关视觉：`input: [text, image]`。
 
-每条规则可含：
+## models.json
+
+每条规则：
 
 | 字段 | 含义 |
 |------|------|
-| `id` | 精确模型 id（优先） |
-| `idPattern` | 正则，匹配模型 id 或 name（忽略大小写） |
-| `reasoningEfforts` | 档位 map，或 `false` 关闭推理 |
-| `thinkingFormat` | 可选：openai / deepseek / qwen … |
-| `vision` | 可选：`true` → `input: [text, image]`；`false` → `input: [text]`；省略则不同步视觉 |
+| `id` | 精确模型 id |
+| `idPattern` | 正则，匹配 id 或 name |
+| `reasoningEfforts` | 档位 map，或 `false` |
+| `thinkingFormat` | 可选 |
+| `vision` | `true` → text+image；`false` → text；省略则不同步视觉 |
 
-匹配顺序：先精确 `id`，再按数组顺序第一条命中的 `idPattern`。
+## 插件
 
-## 本地插件
-
-- 按供应商查看/编辑每个模型的推理档
-- 开关「支持视觉」→ 写 `input: [text, image]` 或 `[text]`
-- 「同步设置」从本仓库拉默认规则，默认只补缺，可勾选覆盖
+见 [`Plugin/`](./Plugin/)。

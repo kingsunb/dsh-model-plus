@@ -1,7 +1,0 @@
-{
-  "version": 2,
-  "name": "dsh-model-plus",
-  "updatedAt": "2026-03-22T12:00:00Z",
-  "description": "Upstream catalog index. Defaults are matched by model name/id only.",
-  "modelsFile": "models.json"
-}

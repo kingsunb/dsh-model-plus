@@ -1,0 +1,12 @@
+{
+  "name": "模型 Plus",
+  "idPrefix": "rsync",
+  "purpose": "本地按供应商编辑思考强度与视觉；远程按模型名从根目录 models.json 同步默认配置。",
+  "defaultModelsUrl": "https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json",
+  "repo": "https://github.com/kingsunb/dsh-model-plus",
+  "files": {
+    "host": "host.js",
+    "client": "client.js"
+  },
+  "presets": ["关闭推理", "通用三档", "全开", "视觉+全开"]
+}

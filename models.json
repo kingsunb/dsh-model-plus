@@ -1,7 +1,7 @@
 {
   "version": 2,
   "name": "dsh-model-plus",
-  "updatedAt": "2026-03-22T12:00:00Z",
+  "updatedAt": "2026-03-22T15:00:00Z",
   "description": "Upstream defaults matched by model id/name patterns only (not by provider).",
   "models": [
     {
