@@ -101,6 +101,11 @@ window.__ModuleLoader__.load({
       .mp-table th,.mp-table td{border-top:1px solid var(--dsw-alias-border-l2);padding:8px 6px;text-align:left;vertical-align:top}
       .mp-table th{color:var(--dsw-alias-label-secondary);font-weight:500}
       .mp-prov{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px 12px}
+      .mp-quick{flex-direction:row;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px}
+      .mp-quick-main{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;flex:1;min-width:0}
+      .mp-quick-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+      .mp-quick-btn{padding:9px 18px;font-weight:600}
+      .mp-quick-result{margin:0}
     `);
 
     function toEditor(model) {
@@ -128,6 +133,7 @@ window.__ModuleLoader__.load({
       const [overwriteEfforts, setOverwriteEfforts] = React.useState(false)
       const [syncVision, setSyncVision] = React.useState(true)
       const [syncPreview, setSyncPreview] = React.useState(null)
+      const [quickResult, setQuickResult] = React.useState(null)
 
       const loadDetail = React.useCallback(async (prov) => {
         if (!prov) { setDetail(null); setEditors({}); return }
@@ -234,6 +240,24 @@ window.__ModuleLoader__.load({
         finally { setBusy(false) }
       }
 
+      const quickSync = async () => {
+        setBusy(true); setError(''); setOkMsg(''); setQuickResult(null)
+        try {
+          const res = await api.syncApply({
+            provider: provider, modelsUrl: modelsUrl, indexUrl: modelsUrl,
+            overwriteEfforts: overwriteEfforts, syncVision: syncVision,
+          })
+          setQuickResult(res)
+          setOkMsg(res.message || '已同步')
+          await loadDetail(provider)
+          setBoot(await api.bootstrap())
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e))
+          setQuickResult({ error: e && e.message ? e.message : String(e) })
+        }
+        finally { setBusy(false) }
+      }
+
       if (loading) return React.createElement('div', { className: 'mp-root' }, React.createElement('h2', { className: 'mp-h' }, '模型 Plus'), React.createElement('p', { className: 'mp-sub' }, '加载中…'))
 
       const providers = (boot && boot.providers) || []
@@ -244,6 +268,26 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { className: 'mp-root' },
         React.createElement('h2', { className: 'mp-h' }, '模型 Plus'),
         React.createElement('p', { className: 'mp-sub' }, (boot && boot.note) || ''),
+
+        React.createElement('div', { className: 'mp-card mp-quick' },
+          React.createElement('div', { className: 'mp-quick-main' },
+            React.createElement('div', { className: 'mp-quick-text' },
+              React.createElement('strong', null, '一键同步'),
+              React.createElement('span', { className: 'mp-muted' }, '从远程 models.json 按模型名写回当前供应商'),
+            ),
+            React.createElement('button', {
+              type: 'button', className: 'mp-btn primary mp-quick-btn',
+              disabled: busy || !provider || !(boot && boot.writable),
+              title: provider ? ('同步到：' + provider) : '请先选择供应商',
+              onClick: quickSync,
+            }, busy ? '同步中…' : '一键同步'),
+          ),
+          quickResult && React.createElement('div', { className: 'mp-muted mp-quick-result' },
+            quickResult.error
+              ? '同步失败：' + quickResult.error
+              : ('已同步 ' + (quickResult.changeCount || 0) + ' 项 · 本地模型 ' + (quickResult.localCount || 0) + (quickResult.skipped ? ' · 无变更' : '')),
+          ),
+        ),
 
         React.createElement('div', { className: 'mp-card' },
           React.createElement('div', { className: 'mp-tabs' },
