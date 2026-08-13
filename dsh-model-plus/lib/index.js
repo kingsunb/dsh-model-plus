@@ -27,7 +27,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.6'
+const VERSION = '0.1.7'
 const DEFAULT_MODELS_URL =
   'https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json'
 const FETCH_TIMEOUT_MS = 15000
@@ -382,9 +382,10 @@ export function apply(ctx) {
 
   function matchRemoteModel(remoteModels, localId) {
     const id = String(localId || '')
+    const idLower = id.toLowerCase()
     for (const m of (remoteModels || [])) {
       if (!m) continue
-      if (typeof m.id === 'string' && m.id === id) return m
+      if (typeof m.id === 'string' && m.id.toLowerCase() === idLower) return m
       if (typeof m.idPattern === 'string' && m.idPattern) {
         try { if (new RegExp(m.idPattern).test(id)) return m } catch (_) {}
       }
