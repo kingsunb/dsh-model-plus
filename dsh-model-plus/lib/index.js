@@ -27,6 +27,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
+const VERSION = '0.1.6'
 const DEFAULT_MODELS_URL =
   'https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json'
 const FETCH_TIMEOUT_MS = 15000
@@ -270,9 +271,80 @@ export function apply(ctx) {
     return url
   }
 
+  function httpsGetText(url, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      Promise.all([import('node:https'), import('node:http'), import('node:url')]).then(([https, http, urlMod]) => {
+        const parsed = urlMod.parse(url)
+        const targetHost = parsed.hostname
+        const targetPort = parsed.port || 443
+        const targetPath = parsed.path
+        // 检测代理：HTTPS_PROXY / HTTP_PROXY 环境变量
+        const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || ''
+        const doRequest = (opts) => {
+          const req = https.request(opts, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+              // 跟随重定向
+              res.resume()
+              const redirectUrl = urlMod.resolve(url, res.headers.location)
+              httpsGetText(redirectUrl, timeoutMs).then(resolve, reject)
+              return
+            }
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              res.resume()
+              reject(new Error('HTTP ' + res.statusCode + ' for ' + url))
+              return
+            }
+            const chunks = []
+            res.on('data', (c) => chunks.push(c))
+            res.on('end', () => {
+              const text = Buffer.concat(chunks).toString('utf8')
+              if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) {
+                reject(new Error('远程目录超过 2 MiB 限制'))
+                return
+              }
+              resolve(text)
+            })
+            res.on('error', reject)
+          })
+          req.on('error', reject)
+          req.on('timeout', () => { req.destroy(); reject(new Error('远程目录请求超时（' + timeoutMs + 'ms）')) })
+          req.end()
+          return req
+        }
+        const directOpts = {
+          hostname: targetHost, port: targetPort, path: targetPath, method: 'GET',
+          headers: { 'user-agent': 'dsh-model-plus', 'accept': 'application/json,text/plain,*/*' },
+          timeout: timeoutMs,
+        }
+        if (!proxyUrl) {
+          // 直连
+          doRequest(directOpts)
+          return
+        }
+        // 走 HTTP CONNECT 隧道代理
+        const proxy = urlMod.parse(proxyUrl)
+        const tunnelReq = http.request({
+          hostname: proxy.hostname, port: proxy.port || 8080, method: 'CONNECT',
+          path: targetHost + ':' + targetPort, timeout: timeoutMs,
+          headers: { host: targetHost + ':' + targetPort },
+        })
+        tunnelReq.on('error', reject)
+        tunnelReq.on('timeout', () => { tunnelReq.destroy(); reject(new Error('代理连接超时（' + timeoutMs + 'ms）')) })
+        tunnelReq.on('connect', (proxyRes, socket) => {
+          if (proxyRes.statusCode !== 200) {
+            reject(new Error('代理 CONNECT 失败: HTTP ' + proxyRes.statusCode))
+            return
+          }
+          doRequest(Object.assign({}, directOpts, { socket: socket, agent: false }))
+        })
+        tunnelReq.end()
+      }).catch(reject)
+    })
+  }
+
   async function fetchText(url) {
     const safeUrl = validateModelsUrl(url)
-    // 优先用 ctx.web（如果有 fetch provider 注册且可用）；否则回退到 Node 原生 fetch
+    // 优先用 ctx.web（如果有 fetch provider 注册且可用）；否则回退到 Node https 模块
     const web = ctx.get('web')
     if (web && typeof web.fetch === 'function') {
       try {
@@ -293,29 +365,14 @@ export function apply(ctx) {
         if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) throw new Error('远程目录超过 2 MiB 限制')
         return text
       } catch (e) {
-        // web provider 不可用（如 no usable web provider / WEB_PROVIDER_UNAVAILABLE）
-        // 时，回退到 Node 原生 fetch；其它错误（超时、HTTP 状态、body 解析）继续抛出。
+        // web provider 不可用时回退到 https 模块；其它错误继续抛出
         const msg = e && (e.code || e.message) ? String(e.code || e.message) : String(e)
         if (!/WEB_PROVIDER_UNAVAILABLE|no usable web provider|not registered|configured web provider/i.test(msg)) throw e
-        // 落到下方原生 fetch 回退
+        // 落到下方 https 模块回退
       }
     }
-    // 回退：Node.js 原生 fetch（Node 18+ 内置）
-    if (typeof fetch !== 'function') throw new Error('web 服务不可用且原生 fetch 不存在，无法拉取远程目录')
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-    try {
-      const response = await fetch(safeUrl, { signal: controller.signal })
-      if (!response || !response.ok) throw new Error('HTTP ' + (response && response.status) + ' for ' + safeUrl)
-      const text = await response.text()
-      if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) throw new Error('远程目录超过 2 MiB 限制')
-      return text
-    } catch (e) {
-      if (e && e.name === 'AbortError') throw new Error('远程目录请求超时（' + FETCH_TIMEOUT_MS + 'ms）')
-      throw e
-    } finally {
-      clearTimeout(timer)
-    }
+    // 回退：Node.js 内置 https 模块（直连，不依赖 fetch 环境）
+    return httpsGetText(safeUrl, FETCH_TIMEOUT_MS)
   }
 
   async function fetchJson(url) {
@@ -460,18 +517,9 @@ export function apply(ctx) {
   async function bootstrap() {
     refreshHostProto()
     const plus = readPlus()
-    let pkgVersion = ''
-    try {
-      const url = await import('node:url').then((m) => m)
-      const fs = await import('node:fs').then((m) => m)
-      const path = await import('node:path').then((m) => m)
-      const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-      const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'))
-      pkgVersion = str(pkg.version, '')
-    } catch (_) {}
     return {
       writable: !!ctx.settings.writable,
-      version: pkgVersion,
+      version: VERSION,
       levels: LEVELS.slice(),
       presets: Object.keys(PRESETS).map((id) => ({ id: id, label: PRESETS[id].label })),
       providers: listProviders(),
@@ -560,20 +608,12 @@ export function apply(ctx) {
   }
 
   async function checkUpdate() {
-    let localVersion = ''
-    try {
-      const url = await import('node:url').then((m) => m)
-      const fs = await import('node:fs').then((m) => m)
-      const path = await import('node:path').then((m) => m)
-      const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-      const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'))
-      localVersion = str(pkg.version, '')
-    } catch (_) {}
+    const localVersion = VERSION
     const registryUrl = 'https://registry.npmjs.org/@kingsunb/dsh-model-plus/latest'
     let latestVersion = ''
     let npmUrl = 'https://www.npmjs.com/package/@kingsunb/dsh-model-plus'
     try {
-      // 优先用 ctx.web.fetch，不可用则回退 Node 原生 fetch
+      // 优先用 ctx.web.fetch，不可用则回退 Node https 模块
       let text = ''
       const web = ctx.get('web')
       if (web && typeof web.fetch === 'function') {
@@ -593,24 +633,11 @@ export function apply(ctx) {
         } catch (e) {
           const msg = e && (e.code || e.message) ? String(e.code || e.message) : String(e)
           if (!/WEB_PROVIDER_UNAVAILABLE|no usable web provider|not registered|configured web provider/i.test(msg)) throw e
-          // 落到原生 fetch
-          const controller = new AbortController()
-          const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-          try {
-            const response = await fetch(registryUrl, { signal: controller.signal })
-            if (!response || !response.ok) throw new Error('HTTP ' + (response && response.status))
-            text = await response.text()
-          } finally { clearTimeout(timer) }
+          // 落到 https 模块回退
+          text = await httpsGetText(registryUrl, FETCH_TIMEOUT_MS)
         }
       } else {
-        if (typeof fetch !== 'function') throw new Error('web 服务不可用且原生 fetch 不存在')
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-        try {
-          const response = await fetch(registryUrl, { signal: controller.signal })
-          if (!response || !response.ok) throw new Error('HTTP ' + (response && response.status))
-          text = await response.text()
-        } finally { clearTimeout(timer) }
+        text = await httpsGetText(registryUrl, FETCH_TIMEOUT_MS)
       }
       const data = JSON.parse(text)
       latestVersion = str(data.version, '')
