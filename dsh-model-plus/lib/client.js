@@ -78,9 +78,9 @@ window.__ModuleLoader__.load({
       .mp-tab{border:1px solid var(--dsw-alias-border-l2);background:transparent;color:inherit;border-radius:999px;padding:6px 12px;cursor:pointer;font:inherit}
       .mp-tab[data-on="1"]{background:var(--dsw-alias-state-business-primary);border-color:transparent;color:var(--dsw-alias-label-on-primary,#fff)}
       .mp-row{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:end}
-      .mp-field{display:flex;flex-direction:column;gap:6px;min-width:160px;flex:1}
+      .mp-field{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
       .mp-label{color:var(--dsw-alias-label-secondary);font-size:12px}
-      .mp-select,.mp-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);border-radius:8px;padding:8px 10px;font:inherit;color:inherit;width:100%}
+      .mp-select,.mp-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);border-radius:8px;padding:8px 10px;font:inherit;color:inherit;width:100%;box-sizing:border-box;max-width:100%;min-width:0}
       .mp-input.wire{max-width:120px}
       .mp-btn{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-interactive-bg-secondary);color:inherit;border-radius:8px;padding:7px 11px;cursor:pointer;font:inherit}
       .mp-btn:disabled{opacity:.55;cursor:default}
@@ -313,7 +313,7 @@ window.__ModuleLoader__.load({
 
         React.createElement('div', { className: 'mp-card' },
           React.createElement('div', { className: 'mp-tabs' },
-            React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'models' ? '1' : '0', onClick: () => setTab('models') }, '模型与强度'),
+            React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'models' ? '1' : '0', onClick: () => setTab('models') }, '思考强度'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'context' ? '1' : '0', onClick: () => setTab('context') }, '上下文'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'sync' ? '1' : '0', onClick: () => setTab('sync') }, '同步设置'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'about' ? '1' : '0', onClick: () => setTab('about') }, '关于'),

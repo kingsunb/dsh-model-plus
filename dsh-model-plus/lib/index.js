@@ -27,7 +27,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.7'
+const VERSION = '0.1.8'
 const DEFAULT_MODELS_URL =
   'https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json'
 const FETCH_TIMEOUT_MS = 15000
