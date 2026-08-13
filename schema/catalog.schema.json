@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "dsh-model-plus catalog index",
+  "type": "object",
+  "required": ["version", "providers"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "name": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "defaultProvider": { "type": "string" },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "file"],
+        "properties": {
+          "id": { "type": "string" },
+          "file": { "type": "string" },
+          "match": {
+            "type": "object",
+            "properties": {
+              "providerIds": { "type": "array", "items": { "type": "string" } },
+              "baseURLContains": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

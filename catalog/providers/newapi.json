@@ -1,0 +1,67 @@
+{
+  "id": "newapi",
+  "displayName": "NewAPI / custom OpenAI-compatible gateway",
+  "defaultThinkingFormat": "openai",
+  "models": [
+    {
+      "id": "auto",
+      "reasoningEfforts": false
+    },
+    {
+      "idPattern": "^deepseek",
+      "thinkingFormat": "deepseek",
+      "reasoningEfforts": {
+        "off": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high"
+      }
+    },
+    {
+      "idPattern": "^grok-",
+      "thinkingFormat": "openai",
+      "reasoningEfforts": {
+        "low": "low",
+        "high": "high"
+      }
+    },
+    {
+      "idPattern": "^(gpt-5|o[1-4])",
+      "thinkingFormat": "openai",
+      "reasoningEfforts": {
+        "minimal": "minimal",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh"
+      }
+    },
+    {
+      "idPattern": "^(glm|chatglm)",
+      "thinkingFormat": "openai",
+      "reasoningEfforts": {
+        "off": null,
+        "low": "low",
+        "high": "high"
+      }
+    },
+    {
+      "idPattern": "^(qwen|qwq)",
+      "thinkingFormat": "qwen",
+      "reasoningEfforts": {
+        "off": null,
+        "low": "low",
+        "high": "high"
+      }
+    },
+    {
+      "idPattern": "^claude",
+      "thinkingFormat": "openai",
+      "reasoningEfforts": {
+        "low": "low",
+        "medium": "medium",
+        "high": "high"
+      }
+    }
+  ]
+}

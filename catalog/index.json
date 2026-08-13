@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "name": "dsh-model-plus",
+  "updatedAt": "2026-03-22T00:00:00Z",
+  "defaultProvider": "openai-compatible",
+  "providers": [
+    {
+      "id": "newapi",
+      "file": "providers/newapi.json",
+      "match": {
+        "providerIds": ["newapi"],
+        "baseURLContains": ["superaiapi", "newapi"]
+      }
+    },
+    {
+      "id": "openai-compatible",
+      "file": "providers/openai-compatible.json",
+      "match": {
+        "providerIds": [],
+        "baseURLContains": []
+      }
+    }
+  ]
+}
