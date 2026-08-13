@@ -1,8 +1,8 @@
 {
   "version": 2,
   "name": "dsh-model-plus",
-  "updatedAt": "2026-03-22T15:00:00Z",
-  "description": "Upstream defaults matched by model id/name patterns only (not by provider).",
+  "updatedAt": "2026-03-22T16:30:00Z",
+  "description": "Upstream defaults by model id/name: reasoningEfforts, vision, contextWindow.",
   "models": [
     {
       "idPattern": "^auto$",
@@ -10,75 +10,65 @@
       "vision": false
     },
     {
+      "idPattern": "deepseek-v4-pro|deepseek.*pro",
+      "thinkingFormat": "deepseek",
+      "reasoningEfforts": { "off": null, "low": "low", "medium": "medium", "high": "high" },
+      "vision": false,
+      "contextWindow": 128000
+    },
+    {
+      "idPattern": "deepseek-v4-flash|deepseek.*flash",
+      "thinkingFormat": "deepseek",
+      "reasoningEfforts": { "off": null, "low": "low", "medium": "medium", "high": "high" },
+      "vision": false,
+      "contextWindow": 128000
+    },
+    {
       "idPattern": "deepseek|reasoner|(^|[^a-z])r1([^a-z]|$)",
       "thinkingFormat": "deepseek",
-      "reasoningEfforts": {
-        "off": null,
-        "low": "low",
-        "medium": "medium",
-        "high": "high"
-      },
-      "vision": false
+      "reasoningEfforts": { "off": null, "low": "low", "medium": "medium", "high": "high" },
+      "vision": false,
+      "contextWindow": 128000
     },
     {
-      "idPattern": "grok",
+      "idPattern": "grok-4\\.6|grok-4\\.5|grok",
       "thinkingFormat": "openai",
-      "reasoningEfforts": {
-        "low": "low",
-        "high": "high"
-      },
-      "vision": true
+      "reasoningEfforts": { "low": "low", "high": "high" },
+      "vision": true,
+      "contextWindow": 256000
     },
     {
-      "idPattern": "gpt-5|chatgpt|(^|[^a-z])o[1-4]([^a-z]|$)",
+      "idPattern": "gpt-5\\.6|gpt-5\\.5|gpt-5|chatgpt|(^|[^a-z])o[1-4]([^a-z]|$)",
       "thinkingFormat": "openai",
-      "reasoningEfforts": {
-        "minimal": "minimal",
-        "low": "low",
-        "medium": "medium",
-        "high": "high",
-        "xhigh": "xhigh"
-      },
-      "vision": true
+      "reasoningEfforts": { "minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh" },
+      "vision": true,
+      "contextWindow": 256000
     },
     {
       "idPattern": "glm|chatglm",
       "thinkingFormat": "openai",
-      "reasoningEfforts": {
-        "off": null,
-        "low": "low",
-        "high": "high"
-      },
-      "vision": true
+      "reasoningEfforts": { "off": null, "low": "low", "high": "high" },
+      "vision": true,
+      "contextWindow": 128000
     },
     {
       "idPattern": "qwen|qwq",
       "thinkingFormat": "qwen",
-      "reasoningEfforts": {
-        "off": null,
-        "low": "low",
-        "high": "high"
-      },
-      "vision": true
+      "reasoningEfforts": { "off": null, "low": "low", "high": "high" },
+      "vision": true,
+      "contextWindow": 128000
     },
     {
       "idPattern": "claude",
       "thinkingFormat": "openai",
-      "reasoningEfforts": {
-        "low": "low",
-        "medium": "medium",
-        "high": "high"
-      },
-      "vision": true
+      "reasoningEfforts": { "low": "low", "medium": "medium", "high": "high" },
+      "vision": true,
+      "contextWindow": 200000
     },
     {
       "idPattern": "think|reason",
       "thinkingFormat": "openai",
-      "reasoningEfforts": {
-        "low": "low",
-        "medium": "medium",
-        "high": "high"
-      }
+      "reasoningEfforts": { "low": "low", "medium": "medium", "high": "high" }
     }
   ]
 }
