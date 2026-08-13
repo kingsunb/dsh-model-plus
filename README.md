@@ -52,3 +52,11 @@ https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json
 | `vision` | `true`→`input:[text,image]`；`false`→`[text]` |
 | `contextWindow` | 可选上下文长度（token） |
 | `maxTokens` | 可选默认输出上限 |
+
+## 友情链接
+
+- [Linux.do 社区](https://linux.do/)
+
+## License
+
+MIT
