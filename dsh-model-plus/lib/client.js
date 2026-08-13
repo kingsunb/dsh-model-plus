@@ -106,6 +106,12 @@ window.__ModuleLoader__.load({
       .mp-quick-text{display:flex;flex-direction:column;gap:2px;min-width:0}
       .mp-quick-btn{padding:9px 18px;font-weight:600}
       .mp-quick-result{margin:0}
+      .mp-about-grid{display:flex;flex-direction:column;gap:10px}
+      .mp-about-row{display:flex;flex-direction:column;gap:2px}
+      .mp-about-val{color:var(--dsw-alias-label-primary);font-family:inherit}
+      .mp-about-row code{background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16));border-radius:6px;padding:2px 6px;font-size:12px}
+      .mp-link{color:var(--dsw-alias-state-business-primary);text-decoration:none;word-break:break-all}
+      .mp-link:hover{text-decoration:underline}
     `);
 
     function toEditor(model) {
@@ -294,6 +300,7 @@ window.__ModuleLoader__.load({
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'models' ? '1' : '0', onClick: () => setTab('models') }, '模型与强度'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'context' ? '1' : '0', onClick: () => setTab('context') }, '上下文'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'sync' ? '1' : '0', onClick: () => setTab('sync') }, '同步设置'),
+            React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'about' ? '1' : '0', onClick: () => setTab('about') }, '关于'),
           ),
           React.createElement('div', { className: 'mp-row' },
             React.createElement('div', { className: 'mp-field' },
@@ -401,6 +408,44 @@ window.__ModuleLoader__.load({
                 ))),
               ),
           ),
+        ),
+
+        tab === 'about' && React.createElement('div', { className: 'mp-card' },
+          React.createElement('h3', { className: 'mp-h' }, '模型 Plus'),
+          React.createElement('p', { className: 'mp-sub', style: { margin: 0 } },
+            '本地按供应商编辑模型思考强度 / 视觉 / 上下文，并从远程 models.json 按模型名同步默认配置。',
+          ),
+          React.createElement('div', { className: 'mp-about-grid' },
+            React.createElement('div', { className: 'mp-about-row' },
+              React.createElement('span', { className: 'mp-label' }, '版本'),
+              React.createElement('span', { className: 'mp-about-val' }, (boot && boot.version) || '未知'),
+            ),
+            React.createElement('div', { className: 'mp-about-row' },
+              React.createElement('span', { className: 'mp-label' }, '包名'),
+              React.createElement('code', { className: 'mp-about-val' }, '@kingsunb/dsh-model-plus'),
+            ),
+            React.createElement('div', { className: 'mp-about-row' },
+              React.createElement('span', { className: 'mp-label' }, 'GitHub'),
+              React.createElement('a', { className: 'mp-link', href: (boot && boot.repo) || 'https://github.com/kingsunb/dsh-model-plus', target: '_blank', rel: 'noopener noreferrer' },
+                (boot && boot.repo) || 'https://github.com/kingsunb/dsh-model-plus'),
+            ),
+            React.createElement('div', { className: 'mp-about-row' },
+              React.createElement('span', { className: 'mp-label' }, '说明文档'),
+              React.createElement('a', { className: 'mp-link', href: (boot && boot.homepage) || 'https://github.com/kingsunb/dsh-model-plus#readme', target: '_blank', rel: 'noopener noreferrer' },
+                (boot && boot.homepage) || 'https://github.com/kingsunb/dsh-model-plus#readme'),
+            ),
+            React.createElement('div', { className: 'mp-about-row' },
+              React.createElement('span', { className: 'mp-label' }, '问题反馈'),
+              React.createElement('a', { className: 'mp-link', href: (boot && boot.issues) || 'https://github.com/kingsunb/dsh-model-plus/issues', target: '_blank', rel: 'noopener noreferrer' },
+                (boot && boot.issues) || 'https://github.com/kingsunb/dsh-model-plus/issues'),
+            ),
+            React.createElement('div', { className: 'mp-about-row' },
+              React.createElement('span', { className: 'mp-label' }, '默认同步源'),
+              React.createElement('a', { className: 'mp-link', href: (boot && boot.defaultModelsUrl) || '', target: '_blank', rel: 'noopener noreferrer' },
+                (boot && boot.defaultModelsUrl) || ''),
+            ),
+          ),
+          React.createElement('p', { className: 'mp-muted', style: { margin: 0 } }, 'MIT License · Powered by DeepSeek Harness'),
         ),
 
         tab === 'models' && models.map((m) => {

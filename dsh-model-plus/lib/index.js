@@ -460,8 +460,18 @@ export function apply(ctx) {
   async function bootstrap() {
     refreshHostProto()
     const plus = readPlus()
+    let pkgVersion = ''
+    try {
+      const url = await import('node:url').then((m) => m)
+      const fs = await import('node:fs').then((m) => m)
+      const path = await import('node:path').then((m) => m)
+      const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+      const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'))
+      pkgVersion = str(pkg.version, '')
+    } catch (_) {}
     return {
       writable: !!ctx.settings.writable,
+      version: pkgVersion,
       levels: LEVELS.slice(),
       presets: Object.keys(PRESETS).map((id) => ({ id: id, label: PRESETS[id].label })),
       providers: listProviders(),
@@ -469,6 +479,8 @@ export function apply(ctx) {
       modelsUrl: str(plus.modelsUrl, '') || str(plus.indexUrl, DEFAULT_MODELS_URL) || DEFAULT_MODELS_URL,
       note: '远程 models.json 仅按精确模型 id 同步推理档、输入类型和 token 限额；本地可按供应商编辑。默认 kingsunb/dsh-model-plus/models.json',
       repo: 'https://github.com/kingsunb/dsh-model-plus',
+      homepage: 'https://github.com/kingsunb/dsh-model-plus#readme',
+      issues: 'https://github.com/kingsunb/dsh-model-plus/issues',
     }
   }
 
