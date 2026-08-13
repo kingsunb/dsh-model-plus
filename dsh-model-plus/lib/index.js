@@ -12,6 +12,12 @@
  * @module @kingsunb/dsh-model-plus
  */
 
+import { lookup as dnsLookup } from 'node:dns/promises'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { isIP } from 'node:net'
+import { connect as tlsConnect } from 'node:tls'
+
 /**
  * Host-side route handler signature: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>.
  * WebRoute shape: { kind: 'exact'|'prefix', path: string, handler } from @deepseek-ai/dsh-host-webserver.
@@ -27,7 +33,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.8'
+const VERSION = '0.1.9'
 const DEFAULT_MODELS_URL =
   'https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json'
 const FETCH_TIMEOUT_MS = 15000
@@ -44,6 +50,84 @@ const PRESETS = {
 }
 
 const API_PREFIX = '/api/plus'
+const MAX_REDIRECTS = 5
+const MAX_MODEL_PATTERN_LENGTH = 200
+const MAX_PUBLIC_ERROR_LENGTH = 512
+
+function parseHostHeader(host, protocol) {
+  const value = typeof host === 'string' ? host.trim() : ''
+  if (!value || /[\s\/@?#]/.test(value)) return null
+  try {
+    const parsed = new URL(protocol + '//' + value)
+    if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return null
+    return parsed
+  } catch (_) {
+    return null
+  }
+}
+
+/** Compare an Origin with Host using parsed host/port components, never suffix matching. */
+function sameOriginHost(origin, host) {
+  if (typeof origin !== 'string' || origin === '' || origin === 'null') return false
+  try {
+    const originUrl = new URL(origin)
+    if (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') return false
+    if (originUrl.username || originUrl.password || originUrl.pathname !== '/' || originUrl.search || originUrl.hash) return false
+    const hostUrl = parseHostHeader(host, originUrl.protocol)
+    if (!hostUrl || originUrl.hostname.toLowerCase() !== hostUrl.hostname.toLowerCase()) return false
+    const defaultPort = originUrl.protocol === 'https:' ? '443' : '80'
+    return (originUrl.port || defaultPort) === (hostUrl.port || defaultPort)
+  } catch (_) {
+    return false
+  }
+}
+
+function isSameOriginPost(req) {
+  const site = req.headers['sec-fetch-site']
+  if (typeof site === 'string' && (site === 'cross-site' || site === 'same-site')) return false
+  const origin = req.headers.origin
+  const host = req.headers.host
+  return typeof origin === 'string' && typeof host === 'string' && sameOriginHost(origin, host)
+}
+
+function routeError(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  return message
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[remote-url]')
+    .replace(/[A-Za-z]:[\\/][^\r\n]*/g, '[path]')
+    .slice(0, MAX_PUBLIC_ERROR_LENGTH)
+}
+
+function isSafeIdPattern(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_MODEL_PATTERN_LENGTH && /^[A-Za-z0-9._:/@+~?*\-]+$/.test(value)
+}
+
+/** Linear-time glob matcher for remote model ids; '*' matches any run, '?' one character. */
+function matchIdPattern(pattern, value) {
+  let patternIndex = 0
+  let valueIndex = 0
+  let starIndex = -1
+  let starValueIndex = 0
+  while (valueIndex < value.length) {
+    const patternChar = pattern[patternIndex]
+    if (patternChar === value[valueIndex] || patternChar === '?') {
+      patternIndex += 1
+      valueIndex += 1
+    } else if (patternChar === '*') {
+      starIndex = patternIndex
+      starValueIndex = valueIndex
+      patternIndex += 1
+    } else if (starIndex >= 0) {
+      patternIndex = starIndex + 1
+      starValueIndex += 1
+      valueIndex = starValueIndex
+    } else {
+      return false
+    }
+  }
+  while (pattern[patternIndex] === '*') patternIndex += 1
+  return patternIndex === pattern.length
+}
 
 /**
  * Register the model-plus host API on the context: the settings-backed model
@@ -86,12 +170,12 @@ export function apply(ctx) {
   function cloneModel(entry) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
     const id = typeof entry.id === 'string' ? entry.id.trim() : ''
-    const idPattern = typeof entry.idPattern === 'string' && entry.idPattern.length > 0 && entry.idPattern.length <= 200 ? entry.idPattern : ''
-    if (!id && !idPattern) return null
+    const idPattern = isSafeIdPattern(entry.idPattern) ? entry.idPattern : ''
+    if ((!id || id.length > 200) && !idPattern) return null
     const out = {}
     if (id) out.id = id
     if (idPattern) out.idPattern = idPattern
-    if (typeof entry.name === 'string' && entry.name) out.name = entry.name
+    if (typeof entry.name === 'string' && entry.name.length <= 200 && entry.name) out.name = entry.name
     if (typeof entry.contextWindow === 'number' && Number.isFinite(entry.contextWindow) && entry.contextWindow > 0) out.contextWindow = Math.floor(entry.contextWindow)
     if (typeof entry.maxTokens === 'number' && Number.isFinite(entry.maxTokens) && entry.maxTokens > 0) out.maxTokens = Math.floor(entry.maxTokens)
     if (Array.isArray(entry.input)) {
@@ -391,9 +475,7 @@ export function apply(ctx) {
     for (const m of (remoteModels || [])) {
       if (!m) continue
       if (typeof m.id === 'string' && m.id.toLowerCase() === idLower) return m
-      if (typeof m.idPattern === 'string' && m.idPattern) {
-        try { if (new RegExp(m.idPattern).test(id)) return m } catch (_) {}
-      }
+      if (typeof m.idPattern === 'string' && matchIdPattern(m.idPattern, id)) return m
     }
     return null
   }
@@ -710,7 +792,7 @@ export function apply(ctx) {
         const origin = req.headers.origin
         if (origin) {
           const host = req.headers.host
-          if (host && !origin.endsWith(host)) {
+          if (host && !sameOriginHost(origin, host)) {
             json(res, 403, { ok: false, error: 'cross-origin denied' }); return
           }
         }
