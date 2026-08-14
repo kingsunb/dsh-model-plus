@@ -21,17 +21,32 @@
 /** Stable cordis plugin name (matches cordis.patch.yml insert id). */
 export const name = 'model-plus'
 
-/** Host 半区所需服务：settings 读写、web 路由、timer 超时。 */
+/**
+ * Host 半区 inject：cordis 只认 string[] 或 { 服务名: config }。
+ * 不要写 { required, optional }——会被当成服务名 "required"/"optional"，插件永远 pending。
+ * credentials 用 ctx.get('credentials') 可选读取，不进 inject。
+ */
 export const inject = ['settings', 'webServer', 'timer']
 
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.9'
+const VERSION = '0.1.14'
+/** 与 dsh-llm-pi-ai supportedProtocols() 对齐：手写 gateway 可声明的协议。 */
+const PROTOCOLS = ['openai-completions', 'openai-responses', 'anthropic-messages']
+/** 官方 discoverModels 可探测列表的协议（anthropic-messages 无可读 listing）。 */
+const LISTABLE_PROTOCOLS = ['openai-completions', 'openai-responses']
+/** 官方 Models 页同款 route id：小写字母开头，仅 a-z0-9 与短横线。 */
+const ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
+const LEGAL_API_KEY = /^[\x21-\x7E]+$/
+const ENV_LINE_KEY = /^[A-Z][A-Z0-9_]*=[^=]/
 const DEFAULT_MODELS_URL =
   'https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json'
 const FETCH_TIMEOUT_MS = 15000
+const DISCOVER_TIMEOUT_MS = 20000
 const MAX_REMOTE_BYTES = 2 * 1024 * 1024
+/** 与 dsh-llm-pi-ai 探测上限对齐。 */
+const MAX_DISCOVER_BYTES = 4 * 1024 * 1024
 const ALL_EFFORTS = {
   off: null, minimal: 'minimal', low: 'low', medium: 'medium',
   high: 'high', xhigh: 'xhigh', max: 'max',
@@ -335,6 +350,409 @@ export function apply(ctx) {
     throw new Error('写回失败: ' + errors.join(' | '))
   }
 
+  /** 官方 Models 页同款：route → ACME_GATEWAY_API_KEY */
+  function deriveKeyRef(provider) {
+    return String(provider).toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
+  }
+
+  function validateRouteId(route) {
+    const id = str(route, '').trim()
+    if (!id) throw new Error('缺少 Provider ID')
+    if (id.length > 64) throw new Error('Provider ID 最长 64 字符')
+    if (!ROUTE_PATTERN.test(id)) throw new Error('Provider ID 需以小写字母开头，之后可用小写字母、数字和短横线')
+    return id
+  }
+
+  function validateBaseURL(value) {
+    const url = str(value, '').trim()
+    if (!url) throw new Error('自定义提供方需要填写 API 地址（baseURL）')
+    if (url.length > 2048) throw new Error('baseURL 过长')
+    let parsed
+    try { parsed = new URL(url) } catch (_) { throw new Error('baseURL 不是合法 URL') }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('baseURL 仅支持 http/https')
+    return url
+  }
+
+  function validateApiKeyDraft(draft) {
+    if (draft === undefined || draft === null) return ''
+    if (typeof draft !== 'string') throw new Error('API Key 格式无效')
+    if (draft.length === 0) return ''
+    const value = draft.trim()
+    if (!value) throw new Error('API Key 不能只含空白')
+    if (ENV_LINE_KEY.test(value) || ((value[0] === '"' || value[0] === "'" || value[0] === '`') && value.length > 1 && value.endsWith(value[0]))) {
+      throw new Error('API Key 不要粘贴 NAME=value 或带引号的整行')
+    }
+    if (!LEGAL_API_KEY.test(value)) throw new Error('API Key 含非法字符（仅允许可打印 ASCII，不含空格）')
+    if (value.length > 4096) throw new Error('API Key 过长')
+    return value
+  }
+
+  function normalizeCreateModels(raw) {
+    if (!Array.isArray(raw) || !raw.length) throw new Error('自定义提供方至少需要一个模型')
+    const out = []
+    const seen = Object.create(null)
+    for (let i = 0; i < raw.length; i++) {
+      const entry = raw[i]
+      const id = entry && typeof entry === 'object' ? str(entry.id, '').trim() : str(entry, '').trim()
+      if (!id) throw new Error('模型 ' + (i + 1) + ' 缺少 id')
+      if (id.length > 200) throw new Error('模型 ' + (i + 1) + ' id 过长')
+      const key = id.toLowerCase()
+      if (seen[key]) throw new Error('模型 id 重复: ' + id)
+      seen[key] = true
+      const m = { id: id }
+      if (entry && typeof entry === 'object') {
+        if (typeof entry.name === 'string' && entry.name.trim() && entry.name.length <= 200) m.name = entry.name.trim()
+        if (typeof entry.contextWindow === 'number' && Number.isFinite(entry.contextWindow) && entry.contextWindow > 0) m.contextWindow = Math.floor(entry.contextWindow)
+        if (typeof entry.maxTokens === 'number' && Number.isFinite(entry.maxTokens) && entry.maxTokens > 0) m.maxTokens = Math.floor(entry.maxTokens)
+        if (entry.vision === true) m.input = ['text', 'image']
+        else if (Array.isArray(entry.input)) {
+          const input = []
+          for (const item of entry.input) {
+            if (typeof item === 'string' && INPUTS.indexOf(item) >= 0 && input.indexOf(item) < 0) input.push(item)
+          }
+          if (input.length) m.input = input
+        }
+        if (entry.reasoningEfforts === false) m.reasoningEfforts = false
+        else if (entry.reasoningEfforts && typeof entry.reasoningEfforts === 'object' && !Array.isArray(entry.reasoningEfforts)) {
+          const efforts = {}
+          for (const k of Object.keys(entry.reasoningEfforts)) {
+            if (LEVELS.indexOf(k) < 0) continue
+            const w = entry.reasoningEfforts[k]
+            if (k === 'off') efforts.off = null
+            else if (typeof w === 'string' && w.length <= 64) efforts[k] = w
+          }
+          if (Object.keys(efforts).length) m.reasoningEfforts = efforts
+        }
+      }
+      const cloned = cloneModel(m)
+      if (!cloned) throw new Error('模型 ' + (i + 1) + ' 无效')
+      out.push(cloned)
+    }
+    return out
+  }
+
+  async function writeProviderProfile(route, profile) {
+    if (!ctx.settings.writable) throw new Error('settings 只读')
+    refreshHostProto()
+    const errors = []
+    const providersNow = asObject(readPiAi().providers)
+    if (Object.prototype.hasOwnProperty.call(providersNow, route)) {
+      throw new Error('已有提供方使用了这个 ID: ' + route)
+    }
+
+    try {
+      const ops = [Object.assign(H({ op: 'set', path: ['providers', route], value: profile }), {
+        op: 'set',
+        path: ['providers', String(route)],
+        value: H(profile),
+      })]
+      await ctx.settings.mutate(NS, ops)
+      return 'mutate'
+    } catch (e) { errors.push('mutate:' + (e && e.message ? e.message : String(e))) }
+
+    try {
+      await ctx.settings.update(NS, H({ providers: { [route]: profile } }))
+      return 'update'
+    } catch (e) { errors.push('update:' + (e && e.message ? e.message : String(e))) }
+
+    try {
+      const user = getUserLayer() || { providers: {} }
+      if (!user.providers || typeof user.providers !== 'object') user.providers = {}
+      if (Object.prototype.hasOwnProperty.call(user.providers, route) || Object.prototype.hasOwnProperty.call(asObject(readPiAi().providers), route)) {
+        throw new Error('已有提供方使用了这个 ID: ' + route)
+      }
+      user.providers[route] = profile
+      await ctx.settings.replace(NS, H(user))
+      return 'replace'
+    } catch (e) { errors.push('replace:' + (e && e.message ? e.message : String(e))) }
+
+    throw new Error('创建提供方失败: ' + errors.join(' | '))
+  }
+
+  /** Join baseURL with /models the same way dsh-llm-pi-ai listingUrl does (prefix, not URL resolve). */
+  function listingUrl(baseURL) {
+    return String(baseURL).replace(/\/+$/, '') + '/models'
+  }
+
+  function capacityField() {
+    for (let i = 0; i < arguments.length; i++) {
+      const c = arguments[i]
+      if (typeof c === 'number' && Number.isInteger(c) && c > 0) return c
+    }
+    return undefined
+  }
+
+  function labelField() {
+    for (let i = 0; i < arguments.length; i++) {
+      const c = arguments[i]
+      if (typeof c === 'string' && c.length > 0 && c.length <= 200) return c
+    }
+    return undefined
+  }
+
+  /** Parse OpenAI-compatible { data: [...] } listing (same fields as official readListing). */
+  function readOpenAiListing(body) {
+    const data = body && body.data
+    if (!Array.isArray(data)) throw new Error('端点模型列表没有 data 数组；请改用手填模型，或检查 baseURL/协议')
+    const models = []
+    const seen = Object.create(null)
+    for (let i = 0; i < data.length; i++) {
+      const entry = data[i]
+      const id = labelField(entry && entry.id)
+      if (!id) continue
+      const key = id.toLowerCase()
+      if (seen[key]) continue
+      seen[key] = true
+      const name = labelField(entry && entry.name, entry && entry.display_name)
+      const contextWindow = capacityField(entry && entry.context_window, entry && entry.context_length)
+      const maxTokens = capacityField(entry && entry.max_output_tokens, entry && entry.max_tokens)
+      const m = { id: id }
+      if (name) m.name = name
+      if (contextWindow !== undefined) m.contextWindow = contextWindow
+      if (maxTokens !== undefined) m.maxTokens = maxTokens
+      models.push(m)
+    }
+    return models
+  }
+
+  /**
+   * GET arbitrary http(s) URL with optional headers (for provider /models probe).
+   * Supports CONNECT proxy for non-loopback hosts when HTTPS_PROXY/HTTP_PROXY is set.
+   */
+  function httpGetText(url, headers, timeoutMs, maxBytes, redirectCount) {
+    if (typeof redirectCount !== 'number' || redirectCount < 0) redirectCount = 0
+    if (typeof timeoutMs !== 'number' || timeoutMs <= 0) timeoutMs = DISCOVER_TIMEOUT_MS
+    if (typeof maxBytes !== 'number' || maxBytes <= 0) maxBytes = MAX_DISCOVER_BYTES
+    return new Promise((resolve, reject) => {
+      Promise.all([import('node:https'), import('node:http'), import('node:url')]).then(([httpsMod, httpMod, urlMod]) => {
+        let parsed
+        try { parsed = new URL(url) } catch (_) {
+          reject(new Error('探测 URL 非法'))
+          return
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          reject(new Error('探测仅支持 http/https'))
+          return
+        }
+        const isHttps = parsed.protocol === 'https:'
+        const lib = isHttps ? httpsMod : httpMod
+        const targetHost = parsed.hostname
+        const targetPort = parsed.port || (isHttps ? 443 : 80)
+        const targetPath = parsed.pathname + (parsed.search || '')
+        const isLoopback = targetHost === 'localhost' || targetHost === '127.0.0.1' || targetHost === '::1'
+        const proxyUrl = isLoopback
+          ? ''
+          : (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '')
+
+        const finishResponse = (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            res.resume()
+            if (redirectCount >= MAX_REDIRECTS) {
+              reject(new Error('重定向次数超限（' + MAX_REDIRECTS + '）'))
+              return
+            }
+            let nextUrl
+            try { nextUrl = new URL(res.headers.location, url).href } catch (_) {
+              reject(new Error('重定向目标非法'))
+              return
+            }
+            httpGetText(nextUrl, headers, timeoutMs, maxBytes, redirectCount + 1).then(resolve, reject)
+            return
+          }
+          if (res.statusCode === 401 || res.statusCode === 403) {
+            res.resume()
+            reject(new Error('端点返回 ' + res.statusCode + '；请检查 API Key'))
+            return
+          }
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            res.resume()
+            reject(new Error('端点返回 HTTP ' + res.statusCode))
+            return
+          }
+          const declared = Number(res.headers['content-length'])
+          if (Number.isFinite(declared) && declared > maxBytes) {
+            res.resume()
+            reject(new Error('模型列表超过 ' + maxBytes + ' 字节限制'))
+            return
+          }
+          const chunks = []
+          let total = 0
+          res.on('data', (c) => {
+            total += c.length
+            if (total > maxBytes) {
+              res.destroy()
+              reject(new Error('模型列表超过 ' + maxBytes + ' 字节限制'))
+              return
+            }
+            chunks.push(c)
+          })
+          res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+          res.on('error', reject)
+        }
+
+        const reqHeaders = Object.assign({
+          accept: 'application/json',
+          'user-agent': 'dsh-model-plus',
+        }, headers || {})
+
+        const doRequest = (opts) => {
+          const req = lib.request(opts, finishResponse)
+          req.on('error', reject)
+          req.on('timeout', () => { req.destroy(); reject(new Error('获取模型超时（' + timeoutMs + 'ms）')) })
+          req.end()
+          return req
+        }
+
+        const directOpts = {
+          hostname: targetHost,
+          port: targetPort,
+          path: targetPath,
+          method: 'GET',
+          headers: reqHeaders,
+          timeout: timeoutMs,
+        }
+
+        if (!proxyUrl || !isHttps) {
+          // 直连：http 或无代理；本地网关通常走这里
+          doRequest(directOpts)
+          return
+        }
+
+        const proxy = urlMod.parse(proxyUrl)
+        const tunnelReq = httpMod.request({
+          hostname: proxy.hostname,
+          port: proxy.port || 8080,
+          method: 'CONNECT',
+          path: targetHost + ':' + targetPort,
+          timeout: timeoutMs,
+          headers: { host: targetHost + ':' + targetPort },
+        })
+        tunnelReq.on('error', reject)
+        tunnelReq.on('timeout', () => { tunnelReq.destroy(); reject(new Error('代理连接超时（' + timeoutMs + 'ms）')) })
+        tunnelReq.on('connect', (proxyRes, socket) => {
+          if (proxyRes.statusCode !== 200) {
+            reject(new Error('代理 CONNECT 失败: HTTP ' + proxyRes.statusCode))
+            return
+          }
+          doRequest(Object.assign({}, directOpts, { socket: socket, agent: false }))
+        })
+        tunnelReq.end()
+      }).catch(reject)
+    })
+  }
+
+  /**
+   * 官方 Models 页「获取模型」同款：按草稿 baseURL/api/apiKey 探测端点 /models。
+   * 不写 settings；仅返回候选列表供添加表单勾选。
+   */
+  async function discoverModels(args) {
+    const baseURL = validateBaseURL(args && args.baseURL)
+    const api = str(args && args.api, 'openai-completions').trim() || 'openai-completions'
+    if (PROTOCOLS.indexOf(api) < 0) throw new Error('不支持的 API 协议: ' + api)
+    if (LISTABLE_PROTOCOLS.indexOf(api) < 0) {
+      throw new Error('协议「' + api + '」不支持自动获取模型列表，请手填模型 id')
+    }
+    const apiKey = validateApiKeyDraft(args && args.apiKey)
+    const url = listingUrl(baseURL)
+    const headers = {}
+    if (apiKey) headers.authorization = 'Bearer ' + apiKey
+    let text
+    try {
+      text = await httpGetText(url, headers, DISCOVER_TIMEOUT_MS, MAX_DISCOVER_BYTES, 0)
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e)
+      if (/获取模型超时|端点返回|API Key|字节限制|重定向|代理/.test(msg)) throw e
+      throw new Error('无法访问模型列表: ' + msg)
+    }
+    let body
+    try {
+      body = JSON.parse(text)
+    } catch (_) {
+      throw new Error('端点未返回 JSON 模型列表')
+    }
+    const models = readOpenAiListing(body)
+    if (!models.length) throw new Error('端点未返回可用模型（data 为空）')
+    return {
+      ok: true,
+      url: url,
+      api: api,
+      models: models,
+      count: models.length,
+      message: '已获取 ' + models.length + ' 个模型',
+    }
+  }
+
+  async function addProvider(args) {
+    const route = validateRouteId(args && args.route)
+    const displayName = str(args && args.displayName, '').trim()
+    if (displayName.length > 200) throw new Error('显示名称过长')
+    const baseURL = validateBaseURL(args && args.baseURL)
+    const api = str(args && args.api, 'openai-completions').trim() || 'openai-completions'
+    if (PROTOCOLS.indexOf(api) < 0) throw new Error('不支持的 API 协议: ' + api + '（可选 ' + PROTOCOLS.join(', ') + '）')
+    let modelsInput = args && args.models
+    // 未手填模型时：若协议可探测，则默认拉一次 /models（对齐官方「获取模型」）
+    if ((!Array.isArray(modelsInput) || !modelsInput.length) && LISTABLE_PROTOCOLS.indexOf(api) >= 0) {
+      const discovered = await discoverModels({
+        baseURL: baseURL,
+        api: api,
+        apiKey: args && args.apiKey,
+      })
+      modelsInput = discovered.models
+    }
+    const models = normalizeCreateModels(modelsInput)
+    const apiKey = validateApiKeyDraft(args && args.apiKey)
+    const storesKey = apiKey.length > 0
+    const keyRef = deriveKeyRef(route)
+
+    // 再读一次合并视图，避免与官方页并发创建撞车
+    if (Object.prototype.hasOwnProperty.call(asObject(readPiAi().providers), route)) {
+      throw new Error('已有提供方使用了这个 ID: ' + route)
+    }
+
+    const profile = {
+      api: api,
+      baseURL: baseURL,
+      models: models,
+    }
+    if (displayName) profile.displayName = displayName
+    if (storesKey) profile.apiKeyEnv = keyRef
+
+    const via = await writeProviderProfile(route, profile)
+
+    let keyStored = false
+    let keyWarning = ''
+    if (storesKey) {
+      const credentials = ctx.get('credentials')
+      if (!credentials || typeof credentials.set !== 'function') {
+        keyWarning = '提供方已创建，但当前环境无 credentials 服务，API Key 未写入；请稍后在官方「模型」页补填，或设置环境变量 ' + keyRef
+      } else {
+        try {
+          await credentials.set(keyRef, apiKey)
+          keyStored = true
+        } catch (e) {
+          keyWarning = '提供方已创建，但 API Key 写入失败: ' + (e && e.message ? e.message : String(e)) + '（凭据名 ' + keyRef + '）'
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      provider: route,
+      displayName: displayName || route,
+      baseURL: baseURL,
+      api: api,
+      modelCount: models.length,
+      apiKeyEnv: storesKey ? keyRef : '',
+      keyStored: keyStored,
+      via: via,
+      message: keyWarning
+        ? ('已添加提供方 ' + route + '（via ' + via + '）。' + keyWarning)
+        : ('已添加提供方 ' + route + '（' + models.length + ' 个模型' + (keyStored ? '，已存 API Key' : '') + '，via ' + via + '）'),
+      warning: keyWarning || undefined,
+      providers: listProviders(),
+    }
+  }
+
   async function savePlusPrefs(prefs) {
     refreshHostProto()
     const next = Object.assign({}, readPlus(), prefs || {})
@@ -601,15 +1019,19 @@ export function apply(ctx) {
   async function bootstrap() {
     refreshHostProto()
     const plus = readPlus()
+    const credentials = ctx.get('credentials')
     return {
       writable: !!ctx.settings.writable,
       version: VERSION,
       levels: LEVELS.slice(),
       presets: Object.keys(PRESETS).map((id) => ({ id: id, label: PRESETS[id].label })),
       providers: listProviders(),
+      protocols: PROTOCOLS.slice(),
+      listableProtocols: LISTABLE_PROTOCOLS.slice(),
+      canStoreApiKey: !!(credentials && typeof credentials.set === 'function'),
       defaultModelsUrl: DEFAULT_MODELS_URL,
       modelsUrl: str(plus.modelsUrl, '') || str(plus.indexUrl, DEFAULT_MODELS_URL) || DEFAULT_MODELS_URL,
-      note: '远程 models.json 仅按精确模型 id 同步推理档、输入类型和 token 限额；本地可按供应商编辑。默认 kingsunb/dsh-model-plus/models.json',
+      note: '远程 models.json 仅按精确模型 id 同步推理档、输入类型和 token 限额；本地可按供应商编辑，也可在本页添加三方供应商。默认 kingsunb/dsh-model-plus/models.json',
       repo: 'https://github.com/kingsunb/dsh-model-plus',
       homepage: 'https://github.com/kingsunb/dsh-model-plus#readme',
       issues: 'https://github.com/kingsunb/dsh-model-plus/issues',
@@ -816,6 +1238,8 @@ export function apply(ctx) {
       }),
       postRoute(`${API_PREFIX}/save-model`, (b) => saveModel(b)),
       postRoute(`${API_PREFIX}/apply-preset`, (b) => applyPreset(b)),
+      postRoute(`${API_PREFIX}/add-provider`, (b) => addProvider(b)),
+      postRoute(`${API_PREFIX}/discover-models`, (b) => discoverModels(b)),
       postRoute(`${API_PREFIX}/save-sync-url`, (b) => saveSyncUrl(b)),
       postRoute(`${API_PREFIX}/sync-preview`, (b) => syncPreview(b)),
       postRoute(`${API_PREFIX}/sync-apply`, (b) => syncApply(b)),

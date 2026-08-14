@@ -70,10 +70,12 @@ dsh plugin --profile web add link:$(pwd)/dsh-model-plus
   - `list-models`：列出供应商与模型
   - `save-model`：保存单个模型配置
   - `apply-preset`：套用快捷预设
+  - `add-provider`：添加三方供应商（未传 models 时对可探测协议默认拉 `/models`）
+  - `discover-models`：按草稿 baseURL/api/apiKey 探测端点模型列表（官方「获取模型」同款）
   - `save-sync-url`：保存远程同步地址
   - `sync-preview`：预览远程同步结果
   - `sync-apply`：应用远程同步结果
-- **client 半**（`lib/client.js`）：在 `settings.section` slot 注册「模型 Plus」设置页 UI，通过 `fetch` 调用 host 端点完成读写。
+- **client 半**（`lib/client.js`）：在 `settings.section` slot 注册「模型 Plus」设置页 UI，通过 `fetch` 调用 host 端点完成读写。添加供应商时显示名可选，模型默认「获取模型」勾选或创建时自动拉取。
 
 ## 许可
 

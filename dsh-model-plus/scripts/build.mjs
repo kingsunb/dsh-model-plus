@@ -57,8 +57,26 @@ try {
   await import(dataUrl).then((mod) => {
     if (typeof mod.apply !== 'function') fail('lib/index.js must export function apply(ctx)')
     if (typeof mod.name !== 'string' || !mod.name) fail('lib/index.js must export a non-empty name string')
-    if (!Array.isArray(mod.inject) || mod.inject.length === 0) fail('lib/index.js must export a non-empty inject array')
-    console.log(`[build] host half ok: name=${mod.name} inject=[${mod.inject.join(', ')}]`)
+    // cordis Inject.resolve：string[] 或 { 服务名: config }。
+    // 禁止 { required, optional }——会被当成服务名，插件永远 pending。
+    const inj = mod.inject
+    let injLabel = ''
+    if (Array.isArray(inj) && inj.length > 0) {
+      if (!inj.every((n) => typeof n === 'string' && n)) {
+        fail('lib/index.js inject array entries must be non-empty strings')
+      }
+      injLabel = inj.join(', ')
+    } else if (inj && typeof inj === 'object' && !Array.isArray(inj)) {
+      const keys = Object.keys(inj)
+      if (!keys.length) fail('lib/index.js inject object must have at least one service name')
+      if (keys.includes('required') || keys.includes('optional')) {
+        fail('lib/index.js inject must NOT use { required, optional }; cordis treats those keys as service names. Use string[] (required deps) and ctx.get() for optional services')
+      }
+      injLabel = keys.join(', ')
+    } else {
+      fail('lib/index.js must export inject as non-empty string[] or { serviceName: config }')
+    }
+    console.log(`[build] host half ok: name=${mod.name} inject=${injLabel}`)
   })
 } catch (e) {
   fail(`lib/index.js syntax/shape error: ${e?.message ?? e}`)
