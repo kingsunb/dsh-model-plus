@@ -2,8 +2,8 @@
  * dsh-model-plus host half — mounts the model-plus HTTP API.
  *
  * 浏览器半区（lib/client.js）通过同源 `/api/plus/*` JSON 端点与本半区通信：
- * 设置页「模型 Plus」按供应商编辑思考强度/视觉/上下文，并从远程 models.json
- * 按模型名同步默认配置。
+ * 设置页「模型 Plus」按供应商编辑思考强度/视觉/上下文；一键同步默认从
+ * models.dev 按模型 id 补全。
  *
  * 安装：`dsh plugin --profile web add @kingsunb/dsh-model-plus`
  * cordis.patch.yml 把本插件行插入 web profile 的 cordis 层。
@@ -31,7 +31,18 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.14'
+const VERSION = '0.1.27'
+/** 模型测试超时：10 分钟（推理 + 长 SVG 输出可能很慢）。 */
+const TEST_TIMEOUT_MS = 10 * 60 * 1000
+const MAX_TEST_BYTES = 1024 * 1024
+/** 参考 deepseek-harness-model-config：用 models.dev 补全思考强度/上下文/视觉。 */
+const MODELS_DEV_URL = 'https://models.dev/api.json'
+const MODELS_DEV_TIMEOUT_MS = 20000
+const MAX_MODELS_DEV_BYTES = 8 * 1024 * 1024
+/** 默认创意测试提示词（原文）。 */
+const DEFAULT_TEST_PROMPT = 'SVG绘制一个鹈鹕骑自行车的2D动画'
+/** SVG 动画输出较长；推理模型还会先占 reasoning_content，默认 16k。 */
+const DEFAULT_TEST_MAX_TOKENS = 16384
 /** 与 dsh-llm-pi-ai supportedProtocols() 对齐：手写 gateway 可声明的协议。 */
 const PROTOCOLS = ['openai-completions', 'openai-responses', 'anthropic-messages']
 /** 官方 discoverModels 可探测列表的协议（anthropic-messages 无可读 listing）。 */
@@ -516,22 +527,28 @@ export function apply(ctx) {
   }
 
   /**
-   * GET arbitrary http(s) URL with optional headers (for provider /models probe).
-   * Supports CONNECT proxy for non-loopback hosts when HTTPS_PROXY/HTTP_PROXY is set.
+   * HTTP(S) request helper. Supports CONNECT proxy for non-loopback hosts when
+   * HTTPS_PROXY/HTTP_PROXY is set. Returns { statusCode, text } (does not throw on HTTP error status).
    */
-  function httpGetText(url, headers, timeoutMs, maxBytes, redirectCount) {
+  function httpRequestText(url, options, redirectCount) {
+    const opts = options && typeof options === 'object' ? options : {}
+    const method = str(opts.method, 'GET').toUpperCase() || 'GET'
+    const headersIn = opts.headers && typeof opts.headers === 'object' ? opts.headers : {}
+    const body = typeof opts.body === 'string' ? opts.body : ''
+    const timeoutMs = (typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0) ? opts.timeoutMs : DISCOVER_TIMEOUT_MS
+    const maxBytes = (typeof opts.maxBytes === 'number' && opts.maxBytes > 0) ? opts.maxBytes : MAX_DISCOVER_BYTES
+    const rejectHttpError = opts.rejectHttpError === true
     if (typeof redirectCount !== 'number' || redirectCount < 0) redirectCount = 0
-    if (typeof timeoutMs !== 'number' || timeoutMs <= 0) timeoutMs = DISCOVER_TIMEOUT_MS
-    if (typeof maxBytes !== 'number' || maxBytes <= 0) maxBytes = MAX_DISCOVER_BYTES
+
     return new Promise((resolve, reject) => {
       Promise.all([import('node:https'), import('node:http'), import('node:url')]).then(([httpsMod, httpMod, urlMod]) => {
         let parsed
         try { parsed = new URL(url) } catch (_) {
-          reject(new Error('探测 URL 非法'))
+          reject(new Error('请求 URL 非法'))
           return
         }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-          reject(new Error('探测仅支持 http/https'))
+          reject(new Error('仅支持 http/https'))
           return
         }
         const isHttps = parsed.protocol === 'https:'
@@ -551,54 +568,69 @@ export function apply(ctx) {
               reject(new Error('重定向次数超限（' + MAX_REDIRECTS + '）'))
               return
             }
+            if (method !== 'GET' && method !== 'HEAD') {
+              reject(new Error('非 GET 请求遇到重定向（HTTP ' + res.statusCode + '），已中止'))
+              return
+            }
             let nextUrl
             try { nextUrl = new URL(res.headers.location, url).href } catch (_) {
               reject(new Error('重定向目标非法'))
               return
             }
-            httpGetText(nextUrl, headers, timeoutMs, maxBytes, redirectCount + 1).then(resolve, reject)
+            httpRequestText(nextUrl, opts, redirectCount + 1).then(resolve, reject)
             return
           }
-          if (res.statusCode === 401 || res.statusCode === 403) {
-            res.resume()
-            reject(new Error('端点返回 ' + res.statusCode + '；请检查 API Key'))
-            return
-          }
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            res.resume()
-            reject(new Error('端点返回 HTTP ' + res.statusCode))
-            return
-          }
+
           const declared = Number(res.headers['content-length'])
           if (Number.isFinite(declared) && declared > maxBytes) {
             res.resume()
-            reject(new Error('模型列表超过 ' + maxBytes + ' 字节限制'))
+            reject(new Error('响应超过 ' + maxBytes + ' 字节限制'))
             return
           }
           const chunks = []
           let total = 0
+          let aborted = false
           res.on('data', (c) => {
+            if (aborted) return
             total += c.length
             if (total > maxBytes) {
+              aborted = true
               res.destroy()
-              reject(new Error('模型列表超过 ' + maxBytes + ' 字节限制'))
+              reject(new Error('响应超过 ' + maxBytes + ' 字节限制'))
               return
             }
             chunks.push(c)
           })
-          res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+          res.on('end', () => {
+            if (aborted) return
+            const text = Buffer.concat(chunks).toString('utf8')
+            const statusCode = res.statusCode || 0
+            if (rejectHttpError && (statusCode < 200 || statusCode >= 300)) {
+              if (statusCode === 401 || statusCode === 403) {
+                reject(new Error('端点返回 ' + statusCode + '；请检查 API Key'))
+                return
+              }
+              reject(new Error('端点返回 HTTP ' + statusCode))
+              return
+            }
+            resolve({ statusCode: statusCode, text: text })
+          })
           res.on('error', reject)
         }
 
         const reqHeaders = Object.assign({
           accept: 'application/json',
           'user-agent': 'dsh-model-plus',
-        }, headers || {})
+        }, headersIn)
+        if (body && !reqHeaders['content-length'] && !reqHeaders['Content-Length']) {
+          reqHeaders['content-length'] = Buffer.byteLength(body)
+        }
 
-        const doRequest = (opts) => {
-          const req = lib.request(opts, finishResponse)
+        const doRequest = (reqOpts) => {
+          const req = lib.request(reqOpts, finishResponse)
           req.on('error', reject)
-          req.on('timeout', () => { req.destroy(); reject(new Error('获取模型超时（' + timeoutMs + 'ms）')) })
+          req.on('timeout', () => { req.destroy(); reject(new Error('请求超时（' + timeoutMs + 'ms）')) })
+          if (body) req.write(body)
           req.end()
           return req
         }
@@ -607,13 +639,12 @@ export function apply(ctx) {
           hostname: targetHost,
           port: targetPort,
           path: targetPath,
-          method: 'GET',
+          method: method,
           headers: reqHeaders,
           timeout: timeoutMs,
         }
 
         if (!proxyUrl || !isHttps) {
-          // 直连：http 或无代理；本地网关通常走这里
           doRequest(directOpts)
           return
         }
@@ -641,8 +672,705 @@ export function apply(ctx) {
     })
   }
 
+  function httpGetText(url, headers, timeoutMs, maxBytes, redirectCount) {
+    return httpRequestText(url, {
+      method: 'GET',
+      headers: headers,
+      timeoutMs: timeoutMs,
+      maxBytes: maxBytes,
+      rejectHttpError: true,
+    }, redirectCount).then((r) => r.text)
+  }
+
+  function joinEndpoint(baseURL, suffix) {
+    const base = String(baseURL || '').replace(/\/+$/, '')
+    const path = String(suffix || '').replace(/^\/+/, '')
+    return base + '/' + path
+  }
+
+  async function resolveProviderApiKey(profile, overrideKey) {
+    const draft = validateApiKeyDraft(overrideKey)
+    if (draft) return draft
+    const ref = str(profile && profile.apiKeyEnv, '').trim()
+    if (!ref) return ''
+    const credentials = ctx.get('credentials')
+    if (credentials && typeof credentials.resolve === 'function') {
+      try {
+        const hit = await credentials.resolve(ref)
+        const value = hit && typeof hit.value === 'string' ? hit.value : ''
+        if (value) return validateApiKeyDraft(value)
+      } catch (_) {}
+    }
+    try {
+      const envVal = process.env[ref]
+      if (typeof envVal === 'string' && envVal.trim()) return validateApiKeyDraft(envVal)
+    } catch (_) {}
+    return ''
+  }
+
+  function clipText(value, max) {
+    const s = String(value == null ? '' : value)
+    const n = typeof max === 'number' && max > 0 ? max : 2000
+    if (s.length <= n) return s
+    return s.slice(0, n) + '…'
+  }
+
+  function joinNonEmptyTexts(parts) {
+    return (parts || []).map((p) => String(p || '').trim()).filter(Boolean).join('\n\n')
+  }
+
+  function textFromContentField(content) {
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content.map((c) => {
+        if (typeof c === 'string') return c
+        if (!c || typeof c !== 'object') return ''
+        if (typeof c.text === 'string') return c.text
+        if (typeof c.content === 'string') return c.content
+        return ''
+      }).filter(Boolean).join('')
+    }
+    return ''
+  }
+
+  /**
+   * 抽取助手可见文本。DeepSeek/部分网关会把思维链放在 reasoning_content，
+   * 正式答复在 content；content 为空或被 max_tokens 截断时要回退到 reasoning。
+   */
+  function extractAssistantText(api, body) {
+    if (!body || typeof body !== 'object') return { text: '', reasoning: '', finishReason: '' }
+    let text = ''
+    let reasoning = ''
+    let finishReason = ''
+
+    if (api === 'anthropic-messages') {
+      const content = body.content
+      if (Array.isArray(content)) {
+        const texts = []
+        const thinks = []
+        for (const block of content) {
+          if (!block || typeof block !== 'object') continue
+          if (block.type === 'text' && typeof block.text === 'string') texts.push(block.text)
+          if ((block.type === 'thinking' || block.type === 'reasoning') && typeof block.thinking === 'string') thinks.push(block.thinking)
+          if ((block.type === 'thinking' || block.type === 'reasoning') && typeof block.text === 'string') thinks.push(block.text)
+        }
+        text = texts.join('')
+        reasoning = thinks.join('\n')
+      }
+      finishReason = str(body.stop_reason, '')
+      return {
+        text: text || '',
+        reasoning: reasoning || '',
+        finishReason: finishReason,
+        display: text || reasoning || '',
+      }
+    }
+
+    if (api === 'openai-responses') {
+      if (typeof body.output_text === 'string') text = body.output_text
+      const output = body.output
+      if (Array.isArray(output)) {
+        const parts = []
+        const thinks = []
+        for (const item of output) {
+          if (item && typeof item === 'object') {
+            if (item.type === 'reasoning' && typeof item.content === 'string') thinks.push(item.content)
+            if (Array.isArray(item.summary)) {
+              for (const s of item.summary) {
+                if (s && typeof s.text === 'string') thinks.push(s.text)
+              }
+            }
+          }
+          const content = item && item.content
+          if (!Array.isArray(content)) continue
+          for (const c of content) {
+            if (c && typeof c === 'object') {
+              if (typeof c.text === 'string') parts.push(c.text)
+              else if (c.type === 'output_text' && typeof c.text === 'string') parts.push(c.text)
+              else if (c.type === 'reasoning_text' && typeof c.text === 'string') thinks.push(c.text)
+            }
+          }
+        }
+        if (!text && parts.length) text = parts.join('')
+        if (thinks.length) reasoning = thinks.join('\n')
+      }
+      finishReason = str(body.status, '')
+      return {
+        text: text || '',
+        reasoning: reasoning || '',
+        finishReason: finishReason,
+        display: text || reasoning || '',
+      }
+    }
+
+    // openai-completions (+ DeepSeek 兼容)
+    const choices = body.choices
+    if (Array.isArray(choices) && choices[0]) {
+      const choice = choices[0]
+      finishReason = str(choice.finish_reason, '') || str(choice.finishReason, '')
+      const msg = choice.message || choice.delta || {}
+      text = textFromContentField(msg.content)
+      if (!text && typeof choice.text === 'string') text = choice.text
+      // DeepSeek / 网关常见字段
+      const reasoningCandidates = [
+        msg.reasoning_content,
+        msg.reasoning,
+        msg.thinking,
+        msg.reasoningContent,
+        choice.reasoning_content,
+        body.reasoning_content,
+      ]
+      for (const c of reasoningCandidates) {
+        const t = textFromContentField(c)
+        if (t) { reasoning = t; break }
+      }
+    }
+
+    return {
+      text: text || '',
+      reasoning: reasoning || '',
+      finishReason: finishReason,
+      display: joinNonEmptyTexts([text, !text && reasoning ? reasoning : '']),
+    }
+  }
+
+  function extractErrorMessage(body, fallback) {
+    if (body && typeof body === 'object') {
+      if (typeof body.error === 'string' && body.error) return body.error
+      if (body.error && typeof body.error === 'object') {
+        if (typeof body.error.message === 'string' && body.error.message) return body.error.message
+        if (typeof body.error.code === 'string' && body.error.code) return body.error.code
+      }
+      if (typeof body.message === 'string' && body.message) return body.message
+    }
+    return fallback || '请求失败'
+  }
+
+  /**
+   * 向已配置供应商发一条最小聊天请求，验证 Key / baseURL / 模型可用性。
+   * 不落盘；不走 dsh-llm 会话栈。
+   */
+  async function testModel(args) {
+    const provider = str(args && args.provider, '').trim()
+    const modelId = str(args && args.modelId, '').trim()
+    if (!provider) throw new Error('缺少 provider')
+    if (!modelId) throw new Error('缺少 modelId')
+    if (modelId.length > 200) throw new Error('modelId 过长')
+
+    const profile = asObject(asObject(readPiAi().providers)[provider])
+    if (!Object.keys(profile).length) throw new Error('供应商未配置: ' + provider)
+    const baseURL = str(profile.baseURL, '').trim()
+    if (!baseURL) throw new Error('该供应商未配置 baseURL，无法测试')
+    // 校验形态（允许已存的 http/https）
+    validateBaseURL(baseURL)
+
+    const api = str(profile.api, 'openai-completions').trim() || 'openai-completions'
+    if (PROTOCOLS.indexOf(api) < 0) throw new Error('不支持的 API 协议: ' + api)
+
+    const models = getRawModels(provider)
+    const model = models.find((m) => m && m.id === modelId)
+    if (!model && models.length) {
+      // 允许测未写入 profile.models 的 id（网关动态模型），但提示
+    }
+
+    let prompt = str(args && args.prompt, DEFAULT_TEST_PROMPT).trim() || DEFAULT_TEST_PROMPT
+    if (prompt.length > 8000) throw new Error('测试提示词最长 8000 字符')
+    let maxTokens = Number(args && args.maxTokens)
+    if (!Number.isFinite(maxTokens) || maxTokens <= 0) maxTokens = DEFAULT_TEST_MAX_TOKENS
+    maxTokens = Math.min(32768, Math.max(64, Math.floor(maxTokens)))
+
+    const effort = str(args && args.effort, '').trim()
+    if (effort && LEVELS.indexOf(effort) < 0) throw new Error('无效思考强度: ' + effort)
+
+    const apiKey = await resolveProviderApiKey(profile, args && args.apiKey)
+    const started = Date.now()
+
+    let url = ''
+    let headers = { 'content-type': 'application/json', accept: 'application/json' }
+    let bodyObj = null
+
+    if (api === 'openai-completions') {
+      url = joinEndpoint(baseURL, 'chat/completions')
+      bodyObj = {
+        model: modelId,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: maxTokens,
+        stream: false,
+        temperature: 0,
+      }
+      if (effort && effort !== 'off') {
+        // 常见 OpenAI/网关字段；不认识的服务端会忽略或报错，错误会回显
+        bodyObj.reasoning_effort = effort
+      }
+      if (apiKey) headers.authorization = 'Bearer ' + apiKey
+    } else if (api === 'openai-responses') {
+      url = joinEndpoint(baseURL, 'responses')
+      bodyObj = {
+        model: modelId,
+        input: prompt,
+        max_output_tokens: maxTokens,
+      }
+      if (effort && effort !== 'off') bodyObj.reasoning = { effort: effort }
+      if (apiKey) headers.authorization = 'Bearer ' + apiKey
+    } else if (api === 'anthropic-messages') {
+      url = joinEndpoint(baseURL, 'messages')
+      bodyObj = {
+        model: modelId,
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: prompt }],
+      }
+      headers['anthropic-version'] = '2023-06-01'
+      if (apiKey) headers['x-api-key'] = apiKey
+    } else {
+      throw new Error('不支持的 API 协议: ' + api)
+    }
+
+    const body = JSON.stringify(bodyObj)
+    let response
+    try {
+      response = await httpRequestText(url, {
+        method: 'POST',
+        headers: headers,
+        body: body,
+        timeoutMs: TEST_TIMEOUT_MS,
+        maxBytes: MAX_TEST_BYTES,
+        rejectHttpError: false,
+      })
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e)
+      throw new Error('测试请求失败: ' + msg)
+    }
+
+    const elapsedMs = Date.now() - started
+    let parsed = null
+    try { parsed = JSON.parse(response.text) } catch (_) { parsed = null }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      const errMsg = extractErrorMessage(parsed, 'HTTP ' + response.statusCode)
+      return {
+        ok: false,
+        provider: provider,
+        modelId: modelId,
+        api: api,
+        url: url,
+        statusCode: response.statusCode,
+        elapsedMs: elapsedMs,
+        hasApiKey: !!apiKey,
+        error: clipText(errMsg, 500),
+        raw: clipText(response.text, 1200),
+        message: '测试失败：HTTP ' + response.statusCode + ' · ' + clipText(errMsg, 200),
+      }
+    }
+
+    const extracted = extractAssistantText(api, parsed)
+    const text = extracted && extracted.text ? extracted.text : ''
+    const reasoning = extracted && extracted.reasoning ? extracted.reasoning : ''
+    const display = (extracted && extracted.display) || text || reasoning || ''
+    const finishReason = extracted && extracted.finishReason ? extracted.finishReason : ''
+    const svg = extractSvgMarkup(display) || extractSvgMarkup(text) || extractSvgMarkup(reasoning)
+    const usage = parsed && parsed.usage && typeof parsed.usage === 'object' ? {
+      promptTokens: Number(parsed.usage.prompt_tokens || parsed.usage.input_tokens) || undefined,
+      completionTokens: Number(parsed.usage.completion_tokens || parsed.usage.output_tokens) || undefined,
+      totalTokens: Number(parsed.usage.total_tokens) || undefined,
+      reasoningTokens: Number(parsed.usage.completion_tokens_details && parsed.usage.completion_tokens_details.reasoning_tokens) || undefined,
+    } : undefined
+
+    const truncated = finishReason === 'length' || (usage && usage.completionTokens && usage.completionTokens >= maxTokens)
+    let message = '测试成功 · ' + elapsedMs + 'ms'
+    if (svg) message += ' · 已解析 SVG'
+    else if (!display) message += '（响应无文本）'
+    else if (!text && reasoning) message += ' · 仅有 reasoning_content'
+    if (truncated) message += ' · 可能被 max_tokens 截断'
+
+    return {
+      ok: true,
+      provider: provider,
+      modelId: modelId,
+      api: api,
+      url: url,
+      statusCode: response.statusCode,
+      elapsedMs: elapsedMs,
+      hasApiKey: !!apiKey,
+      finishReason: finishReason || undefined,
+      truncated: !!truncated,
+      text: clipText(display || '(空响应)', 12000),
+      contentText: clipText(text, 12000),
+      reasoningText: clipText(reasoning, 12000),
+      svg: svg || '',
+      hasSvg: !!svg,
+      usage: usage,
+      message: message,
+    }
+  }
+
+  /** 从模型回复中抽出第一个完整 <svg>...</svg>（容忍 markdown 代码围栏）。 */
+  function extractSvgMarkup(text) {
+    const raw = String(text || '')
+    if (!raw) return ''
+    let s = raw.trim()
+    // 去掉 ```svg ... ``` / ``` ... ```
+    const fenced = s.match(/```(?:svg|xml)?\s*([\s\S]*?)```/i)
+    if (fenced && fenced[1]) s = fenced[1].trim()
+    const lower = s.toLowerCase()
+    const start = lower.indexOf('<svg')
+    if (start < 0) return ''
+    const end = lower.lastIndexOf('</svg>')
+    if (end < 0 || end < start) return ''
+    const svg = s.slice(start, end + 6).trim()
+    if (svg.length < 20 || svg.length > 200000) return ''
+    // 粗过滤：拒绝 script / 外链事件，降低 XSS 面（仍用 sandbox iframe 渲染）
+    if (/<script[\s>]/i.test(svg) || /\bon[a-z]+\s*=/i.test(svg) || /javascript:/i.test(svg)) return ''
+    return svg
+  }
+
+  // ── models.dev catalog (思考强度 / 上下文补全，对齐 model-config 插件) ──
+  let modelsDevCache = null
+  let modelsDevCacheAt = 0
+  let modelsDevInflight = null
+
+  function positiveCatalogLimit(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+  }
+
+  function modelRecordCandidates(catalog, id) {
+    if (!catalog || typeof catalog !== 'object') return []
+    const matches = []
+    const raw = String(id || '').trim()
+    const target = raw.toLowerCase()
+    const norm = normalizeModelIdKey(raw)
+    if (!target) return matches
+    for (const key of Object.keys(catalog)) {
+      const provider = catalog[key]
+      if (!provider || typeof provider !== 'object') continue
+      const models = provider.models
+      if (!models || typeof models !== 'object') continue
+      // models.dev 通常以 id 为 key；也扫一遍 value.id / 规范化 id 兜底
+      let model = models[raw] || models[target] || (norm ? models[norm] : undefined)
+      if (!model) {
+        for (const mk of Object.keys(models)) {
+          const m = models[mk]
+          if (!m || typeof m !== 'object') continue
+          const mkLower = mk.toLowerCase()
+          const mid = String(m.id || mk).toLowerCase()
+          if (mkLower === target || mid === target || normalizeModelIdKey(mk) === norm || normalizeModelIdKey(m.id || mk) === norm) {
+            model = m
+            break
+          }
+        }
+      }
+      if (model && typeof model === 'object') {
+        matches.push({
+          provider: Object.assign({}, provider, { id: provider.id || key }),
+          model: model,
+        })
+      }
+    }
+    return matches
+  }
+
+  function modelMetadataFingerprint(model) {
+    const limit = model && model.limit && typeof model.limit === 'object' ? model.limit : {}
+    const modalities = model && model.modalities && typeof model.modalities === 'object' ? model.modalities : {}
+    return JSON.stringify({
+      context: positiveCatalogLimit(limit.context),
+      output: positiveCatalogLimit(limit.output),
+      input: Array.isArray(modalities.input)
+        ? modalities.input.filter((v) => v === 'text' || v === 'image')
+        : [],
+      reasoning: model && model.reasoning === false ? false : (model && model.reasoning_options),
+    })
+  }
+
+  function catalogModelForEndpoint(catalog, id, baseURL, api) {
+    const candidates = modelRecordCandidates(catalog, id)
+    if (!candidates.length) {
+      // 二次：宽松匹配（去前缀 vendor/、去 :tag、子串）
+      const loose = modelRecordCandidatesLoose(catalog, id)
+      if (!loose.length) return undefined
+      return pickCatalogCandidate(loose, id, baseURL, api)
+    }
+    return pickCatalogCandidate(candidates, id, baseURL, api)
+  }
+
+  /** 网关 id 常带 vendor 前缀或后缀 tag，如 deepseek/deepseek-v4-flash、xxx:thinking */
+  function normalizeModelIdKey(id) {
+    let s = String(id || '').trim().toLowerCase()
+    if (!s) return ''
+    // 去掉 query/fragment 残留
+    s = s.split('?')[0].split('#')[0]
+    // 去 :tag / @tag
+    s = s.replace(/[:@][a-z0-9._-]+$/i, '')
+    // 取最后一段 path（openrouter 风格 vendor/model）
+    if (s.indexOf('/') >= 0) {
+      const parts = s.split('/').filter(Boolean)
+      s = parts[parts.length - 1] || s
+    }
+    return s
+  }
+
+  function modelRecordCandidatesLoose(catalog, id) {
+    if (!catalog || typeof catalog !== 'object') return []
+    const target = normalizeModelIdKey(id)
+    if (!target || target.length < 2) return []
+    const matches = []
+    for (const key of Object.keys(catalog)) {
+      const provider = catalog[key]
+      if (!provider || typeof provider !== 'object') continue
+      const models = provider.models
+      if (!models || typeof models !== 'object') continue
+      for (const mk of Object.keys(models)) {
+        const m = models[mk]
+        if (!m || typeof m !== 'object') continue
+        const mid = normalizeModelIdKey(m.id || mk)
+        if (!mid) continue
+        if (mid === target || mk.toLowerCase() === target || String(m.id || '').toLowerCase() === String(id || '').toLowerCase()) {
+          matches.push({
+            provider: Object.assign({}, provider, { id: provider.id || key }),
+            model: m,
+            matchKey: mk,
+          })
+        }
+      }
+    }
+    return matches
+  }
+
+  const PRIMARY_CATALOG_PROVIDERS = {
+    deepseek: 100,
+    openai: 90,
+    anthropic: 90,
+    google: 80,
+    gemini: 80,
+    xai: 70,
+    mistral: 70,
+    moonshotai: 70,
+    moonshot: 70,
+    qwen: 60,
+    alibaba: 60,
+    meta: 50,
+    openrouter: 20,
+  }
+
+  function providerPreferScore(provider, modelId, hostname) {
+    const pid = str(provider && provider.id, '').toLowerCase()
+    let score = 0
+    if (PRIMARY_CATALOG_PROVIDERS[pid] != null) score += PRIMARY_CATALOG_PROVIDERS[pid]
+    // 主机名包含 provider id（官方域名/反代）
+    if (pid && hostname && hostname.indexOf(pid) >= 0) score += 50
+    // 模型 id 前缀暗示 vendor：deepseek-xxx
+    const nid = normalizeModelIdKey(modelId)
+    if (pid && nid.indexOf(pid) === 0) score += 40
+    // 记录越完整越好
+    return score
+  }
+
+  function metadataRichness(model) {
+    if (!model || typeof model !== 'object') return 0
+    let n = 0
+    const limit = model.limit && typeof model.limit === 'object' ? model.limit : {}
+    if (positiveCatalogLimit(limit.context)) n += 2
+    if (positiveCatalogLimit(limit.output)) n += 2
+    const modalities = model.modalities && typeof model.modalities === 'object' ? model.modalities : {}
+    if (Array.isArray(modalities.input) && modalities.input.length) n += 1
+    if (model.reasoning === false || Array.isArray(model.reasoning_options)) n += 2
+    if (typeof model.name === 'string' && model.name) n += 1
+    return n
+  }
+
+  function pickCatalogCandidate(candidates, id, baseURL, api) {
+    if (!candidates || !candidates.length) return undefined
+    if (candidates.length === 1) return candidates[0].model
+
+    let hostname = ''
+    try { hostname = new URL(baseURL || '').hostname.toLowerCase() } catch (_) {}
+
+    // 1) 主机名命中
+    const hostMatch = candidates.find(({ provider }) => {
+      const pid = str(provider && provider.id, '').toLowerCase()
+      return pid && hostname && hostname.indexOf(pid) >= 0
+    })
+    if (hostMatch) return hostMatch.model
+
+    // 2) 协议暗示的官方厂
+    const canonicalProvider = api === 'openai-responses'
+      ? 'openai'
+      : api === 'anthropic-messages'
+        ? 'anthropic'
+        : undefined
+    if (canonicalProvider) {
+      const canonical = candidates.find(({ provider }) => str(provider && provider.id, '') === canonicalProvider)
+      if (canonical) return canonical.model
+    }
+
+    // 3) 指纹完全一致 → 任意一个
+    const fingerprints = new Set(candidates.map(({ model }) => modelMetadataFingerprint(model)))
+    if (fingerprints.size === 1) return candidates[0].model
+
+    // 4) 多数指纹
+    const fpCount = Object.create(null)
+    for (const c of candidates) {
+      const fp = modelMetadataFingerprint(c.model)
+      fpCount[fp] = (fpCount[fp] || 0) + 1
+    }
+    let bestFp = ''
+    let bestFpN = 0
+    for (const fp of Object.keys(fpCount)) {
+      if (fpCount[fp] > bestFpN) { bestFpN = fpCount[fp]; bestFp = fp }
+    }
+    if (bestFpN >= 2 && bestFpN > candidates.length / 2) {
+      const maj = candidates.find((c) => modelMetadataFingerprint(c.model) === bestFp)
+      if (maj) return maj.model
+    }
+
+    // 5) 按官方 provider 优先 + 元数据完整度打分（网关多副本时不再直接放弃）
+    let best = candidates[0]
+    let bestScore = -1
+    for (const c of candidates) {
+      const score = providerPreferScore(c.provider, id, hostname) * 10 + metadataRichness(c.model)
+      if (score > bestScore) {
+        bestScore = score
+        best = c
+      }
+    }
+    return best && best.model
+  }
+
+  function reasoningEffortsFromCatalog(model) {
+    if (!model || typeof model !== 'object') return undefined
+    if (model.reasoning === false) return false
+    const options = Array.isArray(model.reasoning_options) ? model.reasoning_options : []
+    const effort = options.find((option) => option && typeof option === 'object' && option.type === 'effort')
+    if (!effort || !Array.isArray(effort.values)) return undefined
+    const result = {}
+    for (const value of effort.values) {
+      if (value === 'none' || value === 'off') result.off = null
+      else if (typeof value === 'string' && LEVELS.indexOf(value) >= 0) result[value] = value
+    }
+    return Object.keys(result).some((level) => level !== 'off') ? result : undefined
+  }
+
+  /**
+   * 用 models.dev 记录补全候选模型的 name / context / maxTokens / input / reasoningEfforts。
+   * 只补缺失字段（与参考插件 enrichDiscoveredModel 一致）。
+   */
+  function enrichModelFromCatalog(candidate, catalog, baseURL, api) {
+    const base = candidate && typeof candidate === 'object' ? Object.assign({}, candidate) : { id: '' }
+    if (!base.id) return base
+    const record = catalogModelForEndpoint(catalog, base.id, baseURL, api)
+    if (!record) return Object.assign({}, base, { catalogHit: false })
+    const limit = record.limit && typeof record.limit === 'object' ? record.limit : {}
+    const modalities = record.modalities && typeof record.modalities === 'object' ? record.modalities : {}
+    const input = Array.isArray(modalities.input)
+      ? modalities.input.filter((v) => v === 'text' || v === 'image')
+      : []
+    const reasoningEfforts = reasoningEffortsFromCatalog(record)
+    const filled = []
+    if (!base.name && typeof record.name === 'string' && record.name) {
+      base.name = record.name
+      filled.push('name')
+    }
+    if (base.contextWindow === undefined || base.contextWindow === null || !(base.contextWindow > 0)) {
+      const ctx = positiveCatalogLimit(limit.context)
+      if (ctx !== undefined) { base.contextWindow = ctx; filled.push('contextWindow') }
+    }
+    if (base.maxTokens === undefined || base.maxTokens === null || !(base.maxTokens > 0)) {
+      const out = positiveCatalogLimit(limit.output)
+      if (out !== undefined) { base.maxTokens = out; filled.push('maxTokens') }
+    }
+    if (!Array.isArray(base.input) || !base.input.length) {
+      if (input.length) { base.input = input.slice(); filled.push('input') }
+    }
+    if (!Object.prototype.hasOwnProperty.call(base, 'reasoningEfforts') && reasoningEfforts !== undefined) {
+      base.reasoningEfforts = reasoningEfforts === false ? false : Object.assign({}, reasoningEfforts)
+      filled.push('reasoningEfforts')
+    }
+    base.catalogHit = true
+    base.catalogFilled = filled
+    return base
+  }
+
+  function resolveCatalogUrl(value) {
+    const raw = str(value, '').trim()
+    if (!raw) return MODELS_DEV_URL
+    return validateModelsUrl(raw)
+  }
+
+  function readCatalogUrl() {
+    const plus = readPlus()
+    return resolveCatalogUrl(str(plus.modelsDevUrl, '') || str(plus.modelsUrl, '') || str(plus.indexUrl, '') || MODELS_DEV_URL)
+  }
+
+  // cacheKey = catalog URL；切换自定义地址时不复用旧缓存
+  async function loadModelsDevCatalog(force, catalogUrl) {
+    const url = resolveCatalogUrl(catalogUrl || readCatalogUrl())
+    const now = Date.now()
+    if (!force && modelsDevCache && modelsDevCache.__url === url && (now - modelsDevCacheAt) < 30 * 60 * 1000) {
+      return modelsDevCache
+    }
+    if (!force && modelsDevInflight && modelsDevInflight.__url === url) return modelsDevInflight
+    const job = (async () => {
+      const text = await httpGetText(url, {
+        accept: 'application/json',
+      }, MODELS_DEV_TIMEOUT_MS, MAX_MODELS_DEV_BYTES, 0)
+      let data
+      try { data = JSON.parse(text) } catch (_) {
+        throw new Error('目录返回非 JSON：' + url)
+      }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('目录格式无效（需为对象）：' + url)
+      }
+      // 标记来源 URL，便于缓存命中判断
+      try { Object.defineProperty(data, '__url', { value: url, enumerable: false }) } catch (_) { data.__url = url }
+      modelsDevCache = data
+      modelsDevCacheAt = Date.now()
+      return data
+    })()
+    try { job.__url = url } catch (_) {}
+    modelsDevInflight = job
+    try {
+      return await modelsDevInflight
+    } finally {
+      if (modelsDevInflight === job) modelsDevInflight = null
+    }
+  }
+
+  async function enrichModelsList(models, baseURL, api, options) {
+    const opts = options || {}
+    const enrich = opts.enrich !== false
+    if (!enrich || !Array.isArray(models) || !models.length) {
+      return { models: models || [], catalogApplied: false, catalogError: '', enrichedCount: 0 }
+    }
+    try {
+      const catalog = await loadModelsDevCatalog(!!opts.forceCatalog, opts.catalogUrl)
+      let enrichedCount = 0
+      const next = models.map((m) => {
+        const e = enrichModelFromCatalog(m, catalog, baseURL, api)
+        if (e.catalogHit && e.catalogFilled && e.catalogFilled.length) enrichedCount += 1
+        // 去掉仅供调试的临时字段，避免写进 settings
+        const out = Object.assign({}, e)
+        delete out.catalogHit
+        delete out.catalogFilled
+        return out
+      })
+      return {
+        models: next,
+        catalogApplied: true,
+        catalogError: '',
+        enrichedCount: enrichedCount,
+      }
+    } catch (e) {
+      return {
+        models: models,
+        catalogApplied: false,
+        catalogError: e && e.message ? e.message : String(e),
+        enrichedCount: 0,
+      }
+    }
+  }
+
   /**
    * 官方 Models 页「获取模型」同款：按草稿 baseURL/api/apiKey 探测端点 /models。
+   * 默认再用 models.dev 补全缺失的思考强度/上下文/视觉（参考 model-config 插件）。
    * 不写 settings；仅返回候选列表供添加表单勾选。
    */
   async function discoverModels(args) {
@@ -661,7 +1389,7 @@ export function apply(ctx) {
       text = await httpGetText(url, headers, DISCOVER_TIMEOUT_MS, MAX_DISCOVER_BYTES, 0)
     } catch (e) {
       const msg = e && e.message ? e.message : String(e)
-      if (/获取模型超时|端点返回|API Key|字节限制|重定向|代理/.test(msg)) throw e
+      if (/请求超时|端点返回|API Key|字节限制|重定向|代理/.test(msg)) throw e
       throw new Error('无法访问模型列表: ' + msg)
     }
     let body
@@ -670,15 +1398,154 @@ export function apply(ctx) {
     } catch (_) {
       throw new Error('端点未返回 JSON 模型列表')
     }
-    const models = readOpenAiListing(body)
+    let models = readOpenAiListing(body)
     if (!models.length) throw new Error('端点未返回可用模型（data 为空）')
+    const enrich = args && args.enrich === false ? false : true
+    const enriched = await enrichModelsList(models, baseURL, api, { enrich: enrich })
+    models = enriched.models
+    let message = '已获取 ' + models.length + ' 个模型'
+    if (enriched.catalogApplied && enriched.enrichedCount) {
+      message += '，models.dev 补全 ' + enriched.enrichedCount + ' 个'
+    } else if (enriched.catalogError) {
+      message += '（models.dev 不可用：' + clipText(enriched.catalogError, 80) + '）'
+    }
     return {
       ok: true,
       url: url,
       api: api,
       models: models,
       count: models.length,
-      message: '已获取 ' + models.length + ' 个模型',
+      catalogApplied: enriched.catalogApplied,
+      catalogError: enriched.catalogError || undefined,
+      enrichedCount: enriched.enrichedCount,
+      message: message,
+    }
+  }
+
+  /**
+   * 对已配置供应商的本地模型，用 models.dev 补全缺失的思考强度/上下文/视觉，并可写回。
+   */
+  async function enrichProviderModels(args) {
+    const provider = str(args && args.provider, '').trim()
+    if (!provider) throw new Error('缺少 provider')
+    const profile = asObject(asObject(readPiAi().providers)[provider])
+    if (!Object.keys(profile).length) throw new Error('供应商未配置: ' + provider)
+    const baseURL = str(profile.baseURL, '')
+    const api = str(profile.api, 'openai-completions') || 'openai-completions'
+    const overwrite = !!(args && args.overwrite === true)
+    const apply = args && args.apply === false ? false : true
+    const catalogUrl = resolveCatalogUrl(args && (args.catalogUrl || args.modelsDevUrl || args.modelsUrl))
+    const existing = getRawModels(provider)
+    if (!existing.length) throw new Error('当前供应商没有模型')
+
+    let catalog
+    try {
+      catalog = await loadModelsDevCatalog(!!(args && args.forceCatalog), catalogUrl)
+    } catch (e) {
+      throw new Error('无法加载目录：' + (e && e.message ? e.message : String(e)))
+    }
+
+    const changes = []
+    const nextModels = []
+    let hitCount = 0
+    for (const m of existing) {
+      const local = cloneModel(m) || { id: m.id }
+      const record = catalogModelForEndpoint(catalog, local.id, baseURL, api)
+      if (!record) {
+        nextModels.push(local)
+        continue
+      }
+      hitCount += 1
+      // 构造“远程”补丁形态，复用 applyRemoteToLocal 的缺省/覆盖语义
+      const limit = record.limit && typeof record.limit === 'object' ? record.limit : {}
+      const modalities = record.modalities && typeof record.modalities === 'object' ? record.modalities : {}
+      const input = Array.isArray(modalities.input)
+        ? modalities.input.filter((v) => v === 'text' || v === 'image')
+        : []
+      const remote = { id: local.id }
+      if (typeof record.name === 'string' && record.name) remote.name = record.name
+      const ctx = positiveCatalogLimit(limit.context)
+      const out = positiveCatalogLimit(limit.output)
+      if (ctx !== undefined) remote.contextWindow = ctx
+      if (out !== undefined) remote.maxTokens = out
+      if (input.length) remote.input = input
+      const efforts = reasoningEffortsFromCatalog(record)
+      if (efforts !== undefined) remote.reasoningEfforts = efforts
+
+      // name 单独补
+      let nameChanged = false
+      if (remote.name && (overwrite || !local.name)) {
+        if (local.name !== remote.name) {
+          local.name = remote.name
+          nameChanged = true
+        }
+      }
+      const applied = applyRemoteToLocal(local, remote, overwrite, true)
+      if (nameChanged && applied.notes) applied.notes = (applied.notes ? applied.notes + ',' : '') + '名称'
+      else if (nameChanged) applied.notes = '名称'
+      if (nameChanged) applied.changed = true
+      applied.model = applied.model || local
+      if (nameChanged && applied.model.name !== remote.name) applied.model.name = remote.name
+
+      nextModels.push(applied.model)
+      if (applied.changed) {
+        changes.push({
+          id: local.id,
+          notes: applied.notes,
+          summary: effortSummary(applied.model),
+          vision: hasVision(applied.model),
+          contextWindow: typeof applied.model.contextWindow === 'number' ? applied.model.contextWindow : 0,
+          maxTokens: typeof applied.model.maxTokens === 'number' ? applied.model.maxTokens : 0,
+          matchedBy: 'models.dev',
+        })
+      }
+    }
+
+    let via = ''
+    if (apply && changes.length) {
+      via = await writeModels(provider, nextModels)
+    }
+
+    const sampleIds = existing.slice(0, 5).map((m) => m.id).filter(Boolean)
+    let message = ''
+    if (changes.length) {
+      message = (apply ? '已从 models.dev 写回 ' : '可从 models.dev 补全 ')
+        + changes.length + ' 个模型（命中 ' + hitCount + '/' + existing.length + '）'
+    } else if (hitCount) {
+      message = 'models.dev 命中 ' + hitCount + ' 个，但无需补全（已有字段'
+        + (overwrite ? '' : '，可开覆盖') + '）'
+    } else {
+      message = 'models.dev 未命中当前任一模型 id（本地示例：'
+        + (sampleIds.join(', ') || '无')
+        + '）。已支持去前缀/去 :tag 匹配；若仍为 0，多半是自定义网关私有 id，需手填或改 id 与公开目录一致。'
+    }
+    return {
+      ok: true,
+      provider: provider,
+      catalogUrl: catalogUrl,
+      hitCount: hitCount,
+      changeCount: changes.length,
+      localCount: existing.length,
+      applied: apply && changes.length > 0,
+      via: via || undefined,
+      changes: changes,
+      sampleIds: sampleIds,
+      models: apply ? nextModels.map(modelView) : undefined,
+      message: message,
+    }
+  }
+
+  async function saveCatalogUrl(args) {
+    const catalogUrl = resolveCatalogUrl(args && (args.catalogUrl || args.modelsDevUrl || args.modelsUrl))
+    await savePlusPrefs({ modelsDevUrl: catalogUrl, modelsUrl: catalogUrl, indexUrl: catalogUrl })
+    // 清缓存，下次按新地址拉
+    modelsDevCache = null
+    modelsDevCacheAt = 0
+    return {
+      ok: true,
+      catalogUrl: catalogUrl,
+      modelsDevUrl: catalogUrl,
+      message: '已保存目录地址',
     }
   }
 
@@ -1029,9 +1896,14 @@ export function apply(ctx) {
       protocols: PROTOCOLS.slice(),
       listableProtocols: LISTABLE_PROTOCOLS.slice(),
       canStoreApiKey: !!(credentials && typeof credentials.set === 'function'),
-      defaultModelsUrl: DEFAULT_MODELS_URL,
-      modelsUrl: str(plus.modelsUrl, '') || str(plus.indexUrl, DEFAULT_MODELS_URL) || DEFAULT_MODELS_URL,
-      note: '远程 models.json 仅按精确模型 id 同步推理档、输入类型和 token 限额；本地可按供应商编辑，也可在本页添加三方供应商。默认 kingsunb/dsh-model-plus/models.json',
+      defaultTestPrompt: DEFAULT_TEST_PROMPT,
+      defaultTestMaxTokens: DEFAULT_TEST_MAX_TOKENS,
+      modelsDevUrl: readCatalogUrl(),
+      defaultModelsDevUrl: MODELS_DEV_URL,
+      // 兼容旧字段名
+      defaultModelsUrl: MODELS_DEV_URL,
+      modelsUrl: readCatalogUrl(),
+      note: '一键同步默认从目录（models.dev 或自定义地址）按模型 id 补全思考强度/上下文/视觉；本地可按供应商编辑，也可添加三方供应商。',
       repo: 'https://github.com/kingsunb/dsh-model-plus',
       homepage: 'https://github.com/kingsunb/dsh-model-plus#readme',
       issues: 'https://github.com/kingsunb/dsh-model-plus/issues',
@@ -1240,6 +2112,9 @@ export function apply(ctx) {
       postRoute(`${API_PREFIX}/apply-preset`, (b) => applyPreset(b)),
       postRoute(`${API_PREFIX}/add-provider`, (b) => addProvider(b)),
       postRoute(`${API_PREFIX}/discover-models`, (b) => discoverModels(b)),
+      postRoute(`${API_PREFIX}/enrich-models`, (b) => enrichProviderModels(b)),
+      postRoute(`${API_PREFIX}/save-catalog-url`, (b) => saveCatalogUrl(b)),
+      postRoute(`${API_PREFIX}/test-model`, (b) => testModel(b)),
       postRoute(`${API_PREFIX}/save-sync-url`, (b) => saveSyncUrl(b)),
       postRoute(`${API_PREFIX}/sync-preview`, (b) => syncPreview(b)),
       postRoute(`${API_PREFIX}/sync-apply`, (b) => syncApply(b)),

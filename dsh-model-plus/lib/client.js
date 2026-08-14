@@ -2,7 +2,7 @@
  * dsh-model-plus browser half — registers the「模型 Plus」settings page.
  *
  * 通过 `settings.section` slot 在设置页注册「模型 Plus」分区，用户可本地按
- * 供应商编辑模型思考强度/视觉/上下文，并从远程 models.json 按模型名同步。
+ * 供应商编辑模型思考强度/视觉/上下文；一键同步默认从 models.dev 补全。
  *
  * 本文件是 DSH client bundle 形态：window.__ModuleLoader__.load 工厂。
  * - React 通过 require('react') 从 loader 模块表解析（平台种子模块）。
@@ -53,9 +53,9 @@ window.__ModuleLoader__.load({
       applyPreset: (args) => plusFetch(API + '/apply-preset', args),
       addProvider: (args) => plusFetch(API + '/add-provider', args),
       discoverModels: (args) => plusFetch(API + '/discover-models', args),
-      saveSyncUrl: (args) => plusFetch(API + '/save-sync-url', args),
-      syncPreview: (args) => plusFetch(API + '/sync-preview', args),
-      syncApply: (args) => plusFetch(API + '/sync-apply', args),
+      enrichModels: (args) => plusFetch(API + '/enrich-models', args),
+      saveCatalogUrl: (args) => plusFetch(API + '/save-catalog-url', args),
+      testModel: (args) => plusFetch(API + '/test-model', args),
       checkUpdate: () => plusFetch(API + '/check-update'),
     };
 
@@ -89,6 +89,14 @@ window.__ModuleLoader__.load({
       .mp-import-row{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch}
       .mp-import-row .mp-input{flex:1;min-width:180px}
       .mp-import-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+      .mp-test-out{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-base,transparent);white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:220px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+      .mp-test-meta{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+      .mp-test-grid{display:flex;flex-direction:column;gap:10px}
+      .mp-test-card{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;background:var(--dsw-alias-bg-layer-1,transparent)}
+      .mp-test-card-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+      .mp-svg-frame{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;overflow:hidden;background:#0b1220;min-height:200px}
+      .mp-svg-frame iframe{display:block;width:100%;height:240px;border:0;background:#0b1220}
+      .mp-test-progress{color:var(--dsw-alias-label-secondary);font-size:12px}
       .mp-select,.mp-input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);border-radius:8px;padding:8px 10px;font:inherit;color:inherit;width:100%;box-sizing:border-box;max-width:100%;min-width:0}
       .mp-input.wire{max-width:120px}
       .mp-btn{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-interactive-bg-secondary);color:inherit;border-radius:8px;padding:7px 11px;cursor:pointer;font:inherit}
@@ -149,6 +157,46 @@ window.__ModuleLoader__.load({
 
     const LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
     const ROUTE_PATTERN_CLIENT = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+    const FALLBACK_TEST_PROMPT = 'SVG绘制一个鹈鹕骑自行车的2D动画';
+
+    function extractSvgClient(text) {
+      let s = String(text || '').trim()
+      if (!s) return ''
+      const fenced = s.match(/```(?:svg|xml)?\s*([\s\S]*?)```/i)
+      if (fenced && fenced[1]) s = fenced[1].trim()
+      const lower = s.toLowerCase()
+      const start = lower.indexOf('<svg')
+      if (start < 0) return ''
+      const end = lower.lastIndexOf('</svg>')
+      if (end < 0 || end < start) return ''
+      const svg = s.slice(start, end + 6).trim()
+      if (svg.length < 20) return ''
+      if (/<script[\s>]/i.test(svg) || /\bon[a-z]+\s*=/i.test(svg) || /javascript:/i.test(svg)) return ''
+      return svg
+    }
+
+    function SvgPreview(props) {
+      const svg = props.svg || ''
+      const title = props.title || 'SVG 预览'
+      const srcDoc = React.useMemo(() => {
+        if (!svg) return ''
+        return '<!doctype html><html><head><meta charset="utf-8"/>'
+          + '<style>html,body{margin:0;height:100%;background:#0b1220;display:flex;align-items:center;justify-content:center;overflow:hidden}'
+          + 'svg{max-width:100%;max-height:100%;height:auto;width:auto}</style></head><body>'
+          + svg + '</body></html>'
+      }, [svg])
+      if (!svg) return null
+      return React.createElement('div', { className: 'mp-field' },
+        React.createElement('span', { className: 'mp-label' }, title),
+        React.createElement('div', { className: 'mp-svg-frame' },
+          React.createElement('iframe', {
+            title: title,
+            sandbox: '',
+            srcDoc: srcDoc,
+          }),
+        ),
+      )
+    }
 
     /** Hostname → 合法 Provider ID（点号变短横线）。ai.superaiapi.kdns.fr → ai-superaiapi-kdns-fr */
     function routeFromHostname(hostname) {
@@ -318,10 +366,8 @@ window.__ModuleLoader__.load({
       const [openId, setOpenId] = React.useState('')
       const [error, setError] = React.useState('')
       const [okMsg, setOkMsg] = React.useState('')
-      const [modelsUrl, setModelsUrl] = React.useState('')
       const [overwriteEfforts, setOverwriteEfforts] = React.useState(false)
-      const [syncVision, setSyncVision] = React.useState(true)
-      const [syncPreview, setSyncPreview] = React.useState(null)
+      const [catalogUrl, setCatalogUrl] = React.useState('https://models.dev/api.json')
       const [quickResult, setQuickResult] = React.useState(null)
       const [updateInfo, setUpdateInfo] = React.useState(null)
       const [checking, setChecking] = React.useState(false)
@@ -342,6 +388,48 @@ window.__ModuleLoader__.load({
       const [discoverError, setDiscoverError] = React.useState('')
       const [discoverCandidates, setDiscoverCandidates] = React.useState(null)
       const [discoverPicked, setDiscoverPicked] = React.useState({})
+      const [testPrompt, setTestPrompt] = React.useState(FALLBACK_TEST_PROMPT)
+      // 单模型思考强度覆盖：undefined/'' 表示「自动=该模型最高档」
+      const [testEffortByModel, setTestEffortByModel] = React.useState({})
+      // 并行单测：用 map 记录多个 in-flight 模型，不再全局只锁一个
+      const [testBusyMap, setTestBusyMap] = React.useState({})
+      const [testBatch, setTestBatch] = React.useState(false)
+      const [testProgress, setTestProgress] = React.useState('')
+      const [testResults, setTestResults] = React.useState({})
+      const testStopRef = React.useRef(false)
+      const testBusyCount = Object.keys(testBusyMap || {}).length
+      const anyTestBusy = testBusyCount > 0
+
+      /** 取模型已配置的最高思考档（off/关闭不算）；无配置或关闭推理 → 不传（关闭）。 */
+      const maxEffortOfModel = (m) => {
+        if (!m) return ''
+        if (m.disabled) return ''
+        const enabled = (m.levels || [])
+          .filter((row) => row && row.enabled && row.level && row.level !== 'off')
+          .map((row) => row.level)
+        const ordered = LEVEL_ORDER.filter((lv) => lv !== 'off' && enabled.indexOf(lv) >= 0)
+        if (ordered.length) return ordered[ordered.length - 1]
+        // summary 可能已是最高档文案
+        if (m.summary && m.summary !== '关闭' && m.summary !== '未设置' && LEVEL_ORDER.indexOf(m.summary) >= 0) {
+          return m.summary
+        }
+        // 未配置强度：默认关闭推理（不传 effort）
+        return ''
+      }
+
+      const resolveTestEffort = (modelId, model) => {
+        const override = testEffortByModel && Object.prototype.hasOwnProperty.call(testEffortByModel, modelId)
+          ? testEffortByModel[modelId]
+          : undefined
+        // 显式选了「不传」
+        if (override === '__none__') return ''
+        // 显式选了某档
+        if (override && override !== '__auto__') return override
+        // 自动：模型最高档
+        return maxEffortOfModel(model)
+      }
+      const [enrichBusy, setEnrichBusy] = React.useState(false)
+      const [enrichPreview, setEnrichPreview] = React.useState(null)
 
       const loadDetail = React.useCallback(async (prov) => {
         if (!prov) { setDetail(null); setEditors({}); return }
@@ -357,7 +445,10 @@ window.__ModuleLoader__.load({
         try {
           const b = await api.bootstrap()
           setBoot(b)
-          setModelsUrl(b.modelsUrl || b.defaultModelsUrl || '')
+          setCatalogUrl(b.modelsDevUrl || b.defaultModelsDevUrl || b.defaultModelsUrl || 'https://models.dev/api.json')
+          if (b.defaultTestPrompt) {
+            setTestPrompt((prev) => (!prev || prev === FALLBACK_TEST_PROMPT) ? b.defaultTestPrompt : prev)
+          }
           const rows = b.providers || []
           let prov = provider
           if (!prov || !rows.some((r) => r.provider === prov)) {
@@ -373,8 +464,159 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { reload() }, [])
 
       const switchProvider = async (next) => {
-        setProvider(next); setOkMsg(''); setError(''); setSyncPreview(null); setBusy(true)
+        setProvider(next); setOkMsg(''); setError(''); setBusy(true)
+        testStopRef.current = true
+        setTestResults({}); setTestProgress(''); setTestBusyMap({}); setTestBatch(false); setTestEffortByModel({})
+        setEnrichPreview(null)
         try { await loadDetail(next) } catch (e) { setError(e && e.message ? e.message : String(e)) } finally { setBusy(false) }
+      }
+
+      const markTestBusy = (modelId, on) => {
+        setTestBusyMap((prev) => {
+          const next = Object.assign({}, prev || {})
+          if (on) next[modelId] = true
+          else delete next[modelId]
+          return next
+        })
+      }
+
+      const normalizeTestResult = (res, modelId) => {
+        const base = res && typeof res === 'object' ? res : { ok: false, error: String(res || '空结果') }
+        const text = base.text || ''
+        const svg = base.svg || extractSvgClient(text)
+        return Object.assign({}, base, {
+          modelId: base.modelId || modelId,
+          svg: svg || '',
+          hasSvg: !!(svg || base.hasSvg),
+          at: Date.now(),
+        })
+      }
+
+      const runTestOne = async (modelId) => {
+        const id = String(modelId || '').trim()
+        if (!provider) throw new Error('请先选择供应商')
+        if (!id) throw new Error('缺少模型 id')
+        const model = ((detail && detail.models) || []).find((m) => m && m.id === id)
+        const effort = resolveTestEffort(id, model)
+        const payload = {
+          provider: provider,
+          modelId: id,
+          prompt: testPrompt,
+          maxTokens: (boot && boot.defaultTestMaxTokens) || 16384,
+        }
+        if (effort) payload.effort = effort
+        try {
+          const res = await api.testModel(payload)
+          return normalizeTestResult(Object.assign({}, res, { effortUsed: effort || '' }), id)
+        } catch (e) {
+          return normalizeTestResult({
+            ok: false,
+            modelId: id,
+            effortUsed: effort || '',
+            error: e && e.message ? e.message : String(e),
+            message: e && e.message ? e.message : String(e),
+          }, id)
+        }
+      }
+
+      const runTestModel = async (modelId) => {
+        // 全量测试进行中时，禁止再开并行单测，避免进度混乱
+        if (testBatch) return
+        if (!modelId || testBusyMap[modelId]) return
+        setError(''); setOkMsg('')
+        markTestBusy(modelId, true)
+        setTestResults((prev) => Object.assign({}, prev, {
+          [modelId]: { ok: null, modelId: modelId, pending: true, message: '测试中…' },
+        }))
+        try {
+          const res = await runTestOne(modelId)
+          setTestResults((prev) => Object.assign({}, prev, { [modelId]: res }))
+          if (res.ok) setOkMsg((res.modelId || modelId) + ' · ' + (res.message || '成功'))
+          else setError((res.modelId || modelId) + ' · ' + (res.error || res.message || '失败'))
+        } finally {
+          markTestBusy(modelId, false)
+        }
+      }
+
+      const runTestAll = async () => {
+        if (testBatch || anyTestBusy) return
+        if (!provider) { setError('请先选择供应商'); return }
+        const ids = ((detail && detail.models) || []).map((m) => m.id).filter(Boolean)
+        if (!ids.length) { setError('当前供应商没有模型可测'); return }
+        testStopRef.current = false
+        setTestBatch(true); setError(''); setOkMsg(''); setTestProgress('0/' + ids.length)
+        let pass = 0
+        let fail = 0
+        try {
+          for (let i = 0; i < ids.length; i++) {
+            if (testStopRef.current) {
+              setTestProgress('已停止 · ' + (i) + '/' + ids.length)
+              break
+            }
+            const id = ids[i]
+            markTestBusy(id, true)
+            setTestProgress((i + 1) + '/' + ids.length + ' · ' + id)
+            setTestResults((prev) => Object.assign({}, prev, {
+              [id]: { ok: null, modelId: id, pending: true, message: '测试中…' },
+            }))
+            try {
+              const res = await runTestOne(id)
+              if (res.ok) pass += 1
+              else fail += 1
+              setTestResults((prev) => Object.assign({}, prev, { [id]: res }))
+            } finally {
+              markTestBusy(id, false)
+            }
+          }
+          if (!testStopRef.current) {
+            setOkMsg('全量测试完成：成功 ' + pass + ' · 失败 ' + fail)
+            setTestProgress('完成 · 成功 ' + pass + ' · 失败 ' + fail)
+          }
+        } finally {
+          setTestBusyMap({})
+          setTestBatch(false)
+        }
+      }
+
+      const stopTestAll = () => {
+        testStopRef.current = true
+        setTestProgress((p) => (p ? (p + ' · 停止中…') : '停止中…'))
+      }
+
+      const clearTestResults = () => {
+        setTestResults({})
+        setTestProgress('')
+        setOkMsg('')
+        setError('')
+      }
+
+      const resetTestPrompt = () => {
+        setTestPrompt((boot && boot.defaultTestPrompt) || FALLBACK_TEST_PROMPT)
+      }
+
+      const runEnrichModels = async (apply) => {
+        if (!provider) { setError('请先选择供应商'); return }
+        setEnrichBusy(true); setError(''); setOkMsg('')
+        try {
+          const res = await api.enrichModels({
+            provider: provider,
+            apply: !!apply,
+            overwrite: !!overwriteEfforts,
+            catalogUrl: catalogUrl,
+          })
+          setEnrichPreview(res)
+          if (apply && res.applied) {
+            setOkMsg(res.message || '已补全并写回')
+            await loadDetail(provider)
+            setBoot(await api.bootstrap())
+          } else {
+            setOkMsg(res.message || '预览完成')
+          }
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e))
+        } finally {
+          setEnrichBusy(false)
+        }
       }
 
       const patchEditor = (id, patch) => setEditors((prev) => Object.assign({}, prev, { [id]: Object.assign({}, prev[id] || {}, patch) }))
@@ -472,48 +714,19 @@ window.__ModuleLoader__.load({
         finally { setBusy(false) }
       }
 
-      const saveUrl = async () => {
-        setBusy(true); setError(''); setOkMsg('')
-        try {
-          const res = await api.saveSyncUrl({ modelsUrl: modelsUrl, indexUrl: modelsUrl })
-          setOkMsg(res.message || '已保存地址')
-          setBoot(await api.bootstrap())
-        } catch (e) { setError(e && e.message ? e.message : String(e)) }
-        finally { setBusy(false) }
-      }
-
-      const runSyncPreview = async () => {
-        setBusy(true); setError(''); setOkMsg(''); setSyncPreview(null)
-        try {
-          setSyncPreview(await api.syncPreview({
-            provider: provider, modelsUrl: modelsUrl, indexUrl: modelsUrl, overwriteEfforts: overwriteEfforts, syncVision: syncVision,
-          }))
-        } catch (e) { setError(e && e.message ? e.message : String(e)) }
-        finally { setBusy(false) }
-      }
-
-      const runSyncApply = async () => {
-        setBusy(true); setError(''); setOkMsg('')
-        try {
-          const res = await api.syncApply({
-            provider: provider, modelsUrl: modelsUrl, indexUrl: modelsUrl, overwriteEfforts: overwriteEfforts, syncVision: syncVision,
-          })
-          setOkMsg(res.message || '已同步')
-          setSyncPreview(res)
-          await loadDetail(provider)
-          setBoot(await api.bootstrap())
-        } catch (e) { setError(e && e.message ? e.message : String(e)) }
-        finally { setBusy(false) }
-      }
-
       const quickSync = async () => {
+        // 一键同步 = 目录补全并写回（默认 models.dev，可自定义）
+        if (!provider) { setError('请先选择供应商'); return }
         setBusy(true); setError(''); setOkMsg(''); setQuickResult(null)
         try {
-          const res = await api.syncApply({
-            provider: provider, modelsUrl: modelsUrl, indexUrl: modelsUrl,
-            overwriteEfforts: overwriteEfforts, syncVision: syncVision,
+          const res = await api.enrichModels({
+            provider: provider,
+            apply: true,
+            overwrite: !!overwriteEfforts,
+            catalogUrl: catalogUrl,
           })
           setQuickResult(res)
+          setEnrichPreview(res)
           setOkMsg(res.message || '已同步')
           await loadDetail(provider)
           setBoot(await api.bootstrap())
@@ -522,6 +735,20 @@ window.__ModuleLoader__.load({
           setQuickResult({ error: e && e.message ? e.message : String(e) })
         }
         finally { setBusy(false) }
+      }
+
+      const saveCatalogUrl = async () => {
+        setBusy(true); setError(''); setOkMsg('')
+        try {
+          const res = await api.saveCatalogUrl({ catalogUrl: catalogUrl })
+          setOkMsg(res.message || '已保存目录地址')
+          if (res.catalogUrl) setCatalogUrl(res.catalogUrl)
+          setBoot(await api.bootstrap())
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e))
+        } finally {
+          setBusy(false)
+        }
       }
 
       const runCheckUpdate = async () => {
@@ -758,19 +985,20 @@ window.__ModuleLoader__.load({
           React.createElement('div', { className: 'mp-quick-main' },
             React.createElement('div', { className: 'mp-quick-text' },
               React.createElement('strong', null, '一键同步'),
-              React.createElement('span', { className: 'mp-muted' }, '从远程 models.json 按模型名写回当前供应商'),
+              React.createElement('span', { className: 'mp-muted' }, '按模型 id 补全思考强度 / 上下文 / 视觉，并写回当前供应商'),
             ),
             React.createElement('button', {
               type: 'button', className: 'mp-btn primary mp-quick-btn',
-              disabled: busy || !provider || !(boot && boot.writable),
+              disabled: busy || enrichBusy || !provider || !(boot && boot.writable),
               title: provider ? ('同步到：' + provider) : '请先选择供应商',
               onClick: quickSync,
-            }, busy ? '同步中…' : '一键同步'),
+            }, (busy || enrichBusy) ? '同步中…' : '一键同步'),
           ),
           quickResult && React.createElement('div', { className: 'mp-muted mp-quick-result' },
             quickResult.error
               ? '同步失败：' + quickResult.error
-              : ('已同步 ' + (quickResult.changeCount || 0) + ' 项 · 本地模型 ' + (quickResult.localCount || 0) + (quickResult.skipped ? ' · 无变更' : '')),
+              : ((quickResult.message || ('变更 ' + (quickResult.changeCount || 0)))
+                + (quickResult.hitCount != null ? (' · 命中 ' + quickResult.hitCount + '/' + (quickResult.localCount || 0)) : '')),
           ),
         ),
 
@@ -778,6 +1006,7 @@ window.__ModuleLoader__.load({
           React.createElement('div', { className: 'mp-tabs' },
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'models' ? '1' : '0', onClick: () => setTab('models') }, '思考强度'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'context' ? '1' : '0', onClick: () => setTab('context') }, '上下文'),
+            React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'test' ? '1' : '0', onClick: () => setTab('test') }, '模型测试'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'sync' ? '1' : '0', onClick: () => setTab('sync') }, '同步设置'),
             React.createElement('button', { type: 'button', className: 'mp-tab', 'data-on': tab === 'about' ? '1' : '0', onClick: () => setTab('about') }, '关于'),
           ),
@@ -940,7 +1169,7 @@ window.__ModuleLoader__.load({
               !addApiListable && React.createElement('p', { className: 'mp-muted', style: { margin: 0 } },
                 '协议「' + addApi + '」不支持自动列表，请用手填。'),
               addApiListable && !discoverCandidates && React.createElement('p', { className: 'mp-muted', style: { margin: 0 } },
-                '可点「获取模型」勾选；不点直接创建时，也会默认拉一次全部模型。'),
+                '可点「获取模型」勾选（会用 models.dev 补全强度/上下文）；不点直接创建时也会默认拉一次。'),
               discoverError && React.createElement('p', { className: 'mp-error' }, discoverError),
               discoverCandidates && discoverCandidates.length > 0 && React.createElement('div', { className: 'mp-discover-box' },
                 React.createElement('div', { className: 'mp-discover-head' },
@@ -1058,47 +1287,232 @@ window.__ModuleLoader__.load({
               ),
         ),
 
-        tab === 'sync' && React.createElement('div', { className: 'mp-card' },
+        tab === 'test' && React.createElement('div', { className: 'mp-card' },
           React.createElement('p', { className: 'mp-sub', style: { margin: 0 } },
-            '上游 models.json 按模型名同步思考/视觉/上下文。默认：' + ((boot && boot.defaultModelsUrl) || ''),
+            '默认提示词：SVG绘制一个鹈鹕骑自行车的2D动画。成功后尽量解析并预览 SVG。支持单模型并行测试与一键全测。',
           ),
-          React.createElement('div', { className: 'mp-field' },
-            React.createElement('span', { className: 'mp-label' }, '远程 models.json'),
-            React.createElement('input', { className: 'mp-input', value: modelsUrl, disabled: busy, onChange: (ev) => setModelsUrl(ev.target.value) }),
-          ),
-          React.createElement('div', { className: 'mp-actions' },
-            React.createElement('button', { type: 'button', className: 'mp-btn', disabled: busy, onClick: saveUrl }, '保存地址'),
-            React.createElement('button', { type: 'button', className: 'mp-btn', disabled: busy, onClick: () => setModelsUrl((boot && boot.defaultModelsUrl) || modelsUrl) }, '恢复默认'),
-          ),
-          React.createElement('label', { className: 'mp-checkline' },
-            React.createElement('input', { type: 'checkbox', checked: overwriteEfforts, disabled: busy, onChange: (ev) => setOverwriteEfforts(!!ev.target.checked) }),
-            React.createElement('span', null, '覆盖本地已有推理档（默认只补缺）'),
-          ),
-          React.createElement('label', { className: 'mp-checkline' },
-            React.createElement('input', { type: 'checkbox', checked: syncVision, disabled: busy, onChange: (ev) => setSyncVision(!!ev.target.checked) }),
-            React.createElement('span', null, '同步视觉能力（写 input: text/image）'),
-          ),
-          React.createElement('div', { className: 'mp-actions' },
-            React.createElement('button', { type: 'button', className: 'mp-btn', disabled: busy || !provider, onClick: runSyncPreview }, '预览同步'),
-            React.createElement('button', { type: 'button', className: 'mp-btn primary', disabled: busy || !provider, onClick: runSyncApply }, busy ? '同步中…' : '按模型名写回本地供应商'),
-          ),
-          syncPreview && React.createElement(React.Fragment, null,
-            React.createElement('div', { className: 'mp-muted' },
-              '规则 ' + (syncPreview.remoteRules || 0) +
-              ' · 本地模型 ' + (syncPreview.localCount || 0) +
-              ' · 变更 ' + (syncPreview.changeCount || 0),
+          !provider
+            ? React.createElement('p', { className: 'mp-sub' }, '请先选择供应商。')
+            : React.createElement(React.Fragment, null,
+              selected && React.createElement('div', { className: 'mp-muted' },
+                (selected.displayName || selected.provider) + ' · ' + (selected.baseURL || '无 baseURL') + (selected.api ? (' · ' + selected.api) : '')
+                + ' · ' + models.length + ' 个模型',
+              ),
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, '批量操作'),
+                React.createElement('div', { className: 'mp-actions' },
+                  React.createElement('button', {
+                    type: 'button',
+                    className: 'mp-btn primary',
+                    disabled: busy || anyTestBusy || testBatch || !models.length,
+                    onClick: runTestAll,
+                  }, testBatch ? '全量测试中…' : ('一键测试全部（' + models.length + '）')),
+                  testBatch && React.createElement('button', {
+                    type: 'button', className: 'mp-btn', onClick: stopTestAll,
+                  }, '停止'),
+                  React.createElement('button', {
+                    type: 'button',
+                    className: 'mp-btn',
+                    disabled: busy || anyTestBusy || testBatch || !Object.keys(testResults).length,
+                    onClick: clearTestResults,
+                  }, '清空结果'),
+                ),
+                React.createElement('span', { className: 'mp-field-hint' },
+                  '默认：已配置则用最高档；未配置则关闭推理（不传）。可在单模型卡片上单独改。',
+                ),
+                testProgress
+                  ? React.createElement('div', { className: 'mp-test-progress' }, testProgress)
+                  : (anyTestBusy
+                    ? React.createElement('div', { className: 'mp-test-progress' }, '并行测试中 · ' + testBusyCount + ' 个')
+                    : null),
+              ),
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('div', { className: 'mp-discover-head' },
+                  React.createElement('span', { className: 'mp-label' }, '测试提示词'),
+                  React.createElement('button', {
+                    type: 'button', className: 'mp-linkbtn',
+                    disabled: busy || anyTestBusy || testBatch,
+                    onClick: resetTestPrompt,
+                  }, '恢复默认（鹈鹕自行车 SVG）'),
+                ),
+                React.createElement('textarea', {
+                  className: 'mp-input',
+                  rows: 5,
+                  disabled: busy || anyTestBusy || testBatch,
+                  value: testPrompt,
+                  onChange: (ev) => setTestPrompt(ev.target.value),
+                  style: { resize: 'vertical', minHeight: 96, fontFamily: 'inherit' },
+                }),
+              ),
+              !models.length
+                ? React.createElement('p', { className: 'mp-sub' }, '当前供应商没有模型。可先在「思考强度」同步/添加模型。')
+                : React.createElement('div', { className: 'mp-test-grid' },
+                  models.map((m) => {
+                    const tr = testResults[m.id]
+                    const pending = !!(tr && tr.pending) || !!testBusyMap[m.id]
+                    const autoEffort = maxEffortOfModel(m)
+                    const effortSelect = Object.prototype.hasOwnProperty.call(testEffortByModel, m.id)
+                      ? testEffortByModel[m.id]
+                      : '__auto__'
+                    const effortNow = resolveTestEffort(m.id, m)
+                    const statusLabel = pending
+                      ? '测试中…'
+                      : !tr
+                        ? '未测'
+                        : tr.ok
+                          ? (tr.hasSvg ? '成功 · SVG' : '成功')
+                          : '失败'
+                    const statusClass = pending ? 'mp-muted' : !tr ? 'mp-muted' : tr.ok ? 'mp-ok' : 'mp-error'
+                    return React.createElement('div', { key: m.id, className: 'mp-test-card' },
+                      React.createElement('div', { className: 'mp-test-card-head' },
+                        React.createElement('div', null,
+                          React.createElement('strong', null, m.id),
+                          React.createElement('div', { className: 'mp-muted' }, m.name || ''),
+                          React.createElement('div', { className: 'mp-test-meta', style: { marginTop: 4 } },
+                            React.createElement('span', { className: statusClass, style: { margin: 0 } }, statusLabel),
+                            React.createElement('span', { className: 'mp-muted' },
+                              '强度 ' + (effortNow || '关闭') + (effortSelect === '__auto__' ? '（自动）' : '')),
+                            tr && tr.effortUsed != null && tr.effortUsed !== '' && React.createElement('span', { className: 'mp-muted' }, '已用 ' + tr.effortUsed),
+                            tr && tr.elapsedMs != null && React.createElement('span', { className: 'mp-muted' }, tr.elapsedMs + ' ms'),
+                            tr && tr.statusCode != null && React.createElement('span', { className: 'mp-muted' }, 'HTTP ' + tr.statusCode),
+                            tr && tr.hasApiKey != null && React.createElement('span', { className: 'mp-muted' }, tr.hasApiKey ? '已带 Key' : '未带 Key'),
+                            tr && tr.finishReason && React.createElement('span', { className: 'mp-muted' }, 'finish ' + tr.finishReason),
+                            tr && tr.truncated && React.createElement('span', { className: 'mp-warn' }, '可能截断'),
+                            tr && tr.usage && React.createElement('span', { className: 'mp-muted' },
+                              [
+                                tr.usage.promptTokens != null ? ('in ' + tr.usage.promptTokens) : '',
+                                tr.usage.completionTokens != null ? ('out ' + tr.usage.completionTokens) : '',
+                                tr.usage.reasoningTokens != null ? ('think ' + tr.usage.reasoningTokens) : '',
+                              ].filter(Boolean).join(' · ')),
+                          ),
+                        ),
+                        React.createElement('div', { className: 'mp-actions', style: { alignItems: 'center' } },
+                          React.createElement('select', {
+                            className: 'mp-select',
+                            style: { width: 'auto', minWidth: 140 },
+                            value: effortSelect,
+                            disabled: busy || testBatch || !!testBusyMap[m.id],
+                            title: '自动=已配置则最高档，未配置则关闭（当前：' + (autoEffort || '关闭') + '）',
+                            onChange: (ev) => {
+                              const v = ev.target.value
+                              setTestEffortByModel((prev) => {
+                                const next = Object.assign({}, prev || {})
+                                if (v === '__auto__') delete next[m.id]
+                                else next[m.id] = v
+                                return next
+                              })
+                            },
+                          },
+                            React.createElement('option', { value: '__auto__' }, '自动（' + (autoEffort || '关闭') + '）'),
+                            React.createElement('option', { value: '__none__' }, '不传/关闭'),
+                            LEVEL_ORDER.filter((lv) => lv !== 'off').map((lv) =>
+                              React.createElement('option', { key: lv, value: lv }, lv)),
+                          ),
+                          React.createElement('button', {
+                            type: 'button',
+                            className: 'mp-btn small primary',
+                            // 仅锁住「当前这个模型」和「全量测试中」；其它模型可并行点
+                            disabled: busy || testBatch || !!testBusyMap[m.id],
+                            onClick: () => runTestModel(m.id),
+                          }, pending ? '测试中…' : '测试'),
+                        ),
+                      ),
+                      tr && tr.hasSvg && tr.svg
+                        ? React.createElement(SvgPreview, { svg: tr.svg, title: m.id + ' · SVG 动画预览' })
+                        : null,
+                      tr && !tr.pending && !tr.hasSvg && tr.ok && tr.text && React.createElement('div', { className: 'mp-test-out' },
+                        tr.text,
+                      ),
+                      tr && !tr.pending && React.createElement('details', null,
+                        React.createElement('summary', { className: 'mp-linkbtn', style: { cursor: 'pointer' } },
+                          tr.ok
+                            ? (tr.reasoningText && !tr.contentText ? '查看 reasoning 输出' : '查看原始输出')
+                            : '查看错误详情'),
+                        React.createElement('div', { className: 'mp-test-out' },
+                          tr.ok
+                            ? (
+                              (tr.contentText ? ('[content]\n' + tr.contentText) : '')
+                              + (tr.contentText && tr.reasoningText ? '\n\n' : '')
+                              + (tr.reasoningText ? ('[reasoning_content]\n' + tr.reasoningText) : '')
+                              + (!tr.contentText && !tr.reasoningText ? (tr.text || '(空)') : '')
+                            )
+                            : ((tr.error || tr.message || '失败') + (tr.raw ? ('\n\n' + tr.raw) : '')),
+                        ),
+                      ),
+                    )
+                  }),
+                ),
             ),
-            (syncPreview.modelsUrl || syncPreview.indexUrl) ? React.createElement('div', { className: 'mp-muted' }, syncPreview.modelsUrl || syncPreview.indexUrl) : null,
-            (!syncPreview.changes || !syncPreview.changes.length)
-              ? React.createElement('p', { className: 'mp-sub' }, '没有变更。')
+        ),
+
+        tab === 'sync' && React.createElement('div', { className: 'mp-card' },
+          React.createElement('div', { className: 'mp-field' },
+            React.createElement('span', { className: 'mp-label' }, '目录地址'),
+            React.createElement('input', {
+              className: 'mp-input',
+              value: catalogUrl,
+              disabled: busy || enrichBusy,
+              placeholder: 'https://models.dev/api.json',
+              onChange: (ev) => setCatalogUrl(ev.target.value),
+            }),
+          ),
+          React.createElement('div', { className: 'mp-actions' },
+            React.createElement('button', {
+              type: 'button', className: 'mp-btn',
+              disabled: busy || enrichBusy || !(boot && boot.writable),
+              onClick: saveCatalogUrl,
+            }, '保存地址'),
+            React.createElement('button', {
+              type: 'button', className: 'mp-btn',
+              disabled: busy || enrichBusy,
+              onClick: () => setCatalogUrl((boot && (boot.defaultModelsDevUrl || boot.defaultModelsUrl)) || 'https://models.dev/api.json'),
+            }, '恢复默认'),
+          ),
+          React.createElement('label', { className: 'mp-checkline' },
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: overwriteEfforts,
+              disabled: busy || enrichBusy,
+              onChange: (ev) => setOverwriteEfforts(!!ev.target.checked),
+            }),
+            React.createElement('span', null, '覆盖本地已有字段（默认只补缺）'),
+          ),
+          React.createElement('div', { className: 'mp-actions' },
+            React.createElement('button', {
+              type: 'button', className: 'mp-btn',
+              disabled: busy || enrichBusy || !provider,
+              onClick: () => runEnrichModels(false),
+            }, enrichBusy ? '查询中…' : '预览补全'),
+            React.createElement('button', {
+              type: 'button', className: 'mp-btn primary',
+              disabled: busy || enrichBusy || !provider || !(boot && boot.writable),
+              onClick: quickSync,
+            }, (busy || enrichBusy) ? '同步中…' : '写回本地供应商'),
+          ),
+          enrichPreview && React.createElement(React.Fragment, null,
+            React.createElement('div', { className: 'mp-muted' },
+              (enrichPreview.message || '')
+              + (enrichPreview.hitCount != null ? (' · 命中 ' + enrichPreview.hitCount + '/' + (enrichPreview.localCount || 0)) : '')
+              + (enrichPreview.catalogUrl ? (' · ' + enrichPreview.catalogUrl) : ''),
+            ),
+            (!enrichPreview.changes || !enrichPreview.changes.length)
+              ? React.createElement('p', { className: 'mp-sub' }, '没有可写回变更。')
               : React.createElement('table', { className: 'mp-table' },
                 React.createElement('thead', null, React.createElement('tr', null,
-                  React.createElement('th', null, '模型'), React.createElement('th', null, '匹配'), React.createElement('th', null, '变更'), React.createElement('th', null, '强度/视觉/上下文'))),
-                React.createElement('tbody', null, syncPreview.changes.map((c) => React.createElement('tr', { key: c.id },
+                  React.createElement('th', null, '模型'),
+                  React.createElement('th', null, '匹配'),
+                  React.createElement('th', null, '变更'),
+                  React.createElement('th', null, '强度/视觉/上下文'),
+                )),
+                React.createElement('tbody', null, enrichPreview.changes.map((c) => React.createElement('tr', { key: c.id },
                   React.createElement('td', null, c.id),
-                  React.createElement('td', null, c.matchedBy || ''),
+                  React.createElement('td', null, c.matchedBy || 'models.dev'),
                   React.createElement('td', null, c.notes || ''),
-                  React.createElement('td', null, (c.summary || '') + (c.vision ? ' · 视觉' : '') + (c.contextWindow ? (' · ctx ' + c.contextWindow) : '')),
+                  React.createElement('td', null,
+                    (c.summary || '')
+                    + (c.vision ? ' · 视觉' : '')
+                    + (c.contextWindow ? (' · ctx ' + c.contextWindow) : '')
+                    + (c.maxTokens ? (' · max ' + c.maxTokens) : '')),
                 ))),
               ),
           ),
@@ -1107,7 +1521,7 @@ window.__ModuleLoader__.load({
         tab === 'about' && React.createElement('div', { className: 'mp-card' },
           React.createElement('h3', { className: 'mp-h' }, '模型 Plus'),
           React.createElement('p', { className: 'mp-sub', style: { margin: 0 } },
-            '本地按供应商编辑模型思考强度 / 视觉 / 上下文，并从远程 models.json 按模型名同步默认配置。',
+            '本地按供应商编辑模型思考强度 / 视觉 / 上下文；一键同步默认从 models.dev 按模型 id 补全。',
           ),
           React.createElement('div', { className: 'mp-about-grid' },
             React.createElement('div', { className: 'mp-about-row' },
@@ -1150,8 +1564,12 @@ window.__ModuleLoader__.load({
             ),
             React.createElement('div', { className: 'mp-about-row' },
               React.createElement('span', { className: 'mp-label' }, '默认同步源'),
-              React.createElement('a', { className: 'mp-link', href: (boot && boot.defaultModelsUrl) || '', target: '_blank', rel: 'noopener noreferrer' },
-                (boot && boot.defaultModelsUrl) || ''),
+              React.createElement('a', {
+                className: 'mp-link',
+                href: catalogUrl || (boot && (boot.modelsDevUrl || boot.defaultModelsDevUrl || boot.defaultModelsUrl)) || 'https://models.dev/api.json',
+                target: '_blank',
+                rel: 'noopener noreferrer',
+              }, catalogUrl || (boot && (boot.modelsDevUrl || boot.defaultModelsDevUrl || boot.defaultModelsUrl)) || 'https://models.dev/api.json'),
             ),
           ),
           React.createElement('p', { className: 'mp-muted', style: { margin: 0 } }, 'MIT License · Powered by DeepSeek Harness'),
