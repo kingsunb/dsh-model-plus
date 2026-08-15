@@ -31,7 +31,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.32'
+const VERSION = '0.1.34'
 /** 新建供应商默认重试次数（写入 retryPolicy.maxRetries）。平台默认也是 2。 */
 const DEFAULT_PROVIDER_MAX_RETRIES = 2
 const MAX_PROVIDER_MAX_RETRIES = 50
@@ -1502,6 +1502,129 @@ export function apply(ctx) {
   }
 
   /**
+   * 对已配置供应商拉 /models，标记本地已有 / 新增，供 UI 勾选后合并写入。
+   * 对齐官方 Models 页：候选列表 + 默认勾选「本地还没有的」。
+   */
+  async function refreshProviderModels(args) {
+    const provider = str(args && args.provider, '').trim()
+    if (!provider) throw new Error('缺少 provider')
+    const profile = asObject(asObject(readPiAi().providers)[provider])
+    if (!Object.keys(profile).length) throw new Error('供应商未配置: ' + provider)
+    const baseURL = str(profile.baseURL, '').trim()
+    if (!baseURL) throw new Error('该供应商未配置 baseURL，无法更新模型列表')
+    const api = str(profile.api, 'openai-completions').trim() || 'openai-completions'
+    if (LISTABLE_PROTOCOLS.indexOf(api) < 0) {
+      throw new Error('协议「' + api + '」不支持自动获取模型列表')
+    }
+
+    // 优先用草稿 key（若传入），否则读已存 credentials/env
+    let apiKey = ''
+    if (args && args.apiKey !== undefined && args.apiKey !== null && String(args.apiKey).length) {
+      apiKey = validateApiKeyDraft(args.apiKey)
+    } else {
+      apiKey = await resolveProviderApiKey(profile, '')
+    }
+
+    const discovered = await discoverModels({
+      baseURL: baseURL,
+      api: api,
+      apiKey: apiKey,
+      enrich: args && args.enrich === false ? false : true,
+    })
+
+    const existing = getRawModels(provider)
+    const existingSet = Object.create(null)
+    for (const m of existing) {
+      if (m && m.id) existingSet[String(m.id).toLowerCase()] = true
+    }
+
+    const candidates = []
+    let newCount = 0
+    let knownCount = 0
+    for (const m of (discovered.models || [])) {
+      if (!m || !m.id) continue
+      const isNew = !existingSet[String(m.id).toLowerCase()]
+      if (isNew) newCount += 1
+      else knownCount += 1
+      candidates.push(Object.assign({}, m, { isNew: isNew }))
+    }
+
+    return {
+      ok: true,
+      provider: provider,
+      baseURL: baseURL,
+      api: api,
+      url: discovered.url,
+      existingCount: existing.length,
+      count: candidates.length,
+      newCount: newCount,
+      knownCount: knownCount,
+      candidates: candidates,
+      catalogApplied: discovered.catalogApplied,
+      catalogError: discovered.catalogError,
+      enrichedCount: discovered.enrichedCount,
+      message: newCount
+        ? ('发现 ' + candidates.length + ' 个模型，其中新增 ' + newCount + ' 个（已有 ' + knownCount + '）')
+        : ('发现 ' + candidates.length + ' 个模型，无新增（本地已有 ' + existing.length + '）'),
+    }
+  }
+
+  /**
+   * 把勾选的模型合并进已有供应商 models：已有 id 保留本地配置，只追加新增。
+   */
+  async function addProviderModels(args) {
+    const provider = str(args && args.provider, '').trim()
+    if (!provider) throw new Error('缺少 provider')
+    if (!ctx.settings.writable) throw new Error('settings 只读')
+    const profile = asObject(asObject(readPiAi().providers)[provider])
+    if (!Object.keys(profile).length) throw new Error('供应商未配置: ' + provider)
+
+    const incoming = normalizeCreateModels(args && args.models)
+    const existing = getRawModels(provider)
+    const byId = Object.create(null)
+    const next = []
+    for (const m of existing) {
+      if (!m || !m.id) continue
+      const key = String(m.id).toLowerCase()
+      byId[key] = true
+      next.push(m)
+    }
+    const added = []
+    for (const m of incoming) {
+      const key = String(m.id).toLowerCase()
+      if (byId[key]) continue
+      byId[key] = true
+      next.push(m)
+      added.push(m.id)
+    }
+    if (!added.length) {
+      return {
+        ok: true,
+        skipped: true,
+        provider: provider,
+        addedCount: 0,
+        added: [],
+        localCount: existing.length,
+        message: '没有可新增的模型（所选 id 均已存在）',
+        providers: listProviders(),
+      }
+    }
+    const via = await writeModels(provider, next)
+    return {
+      ok: true,
+      skipped: false,
+      provider: provider,
+      addedCount: added.length,
+      added: added,
+      localCount: next.length,
+      via: via,
+      message: '已新增 ' + added.length + ' 个模型到 ' + provider + '（via ' + via + '）',
+      providers: listProviders(),
+      models: next.map(modelView),
+    }
+  }
+
+  /**
    * 对已配置供应商的本地模型，用 models.dev 补全缺失的思考强度/上下文/视觉，并可写回。
    */
   async function enrichProviderModels(args) {
@@ -2449,6 +2572,8 @@ export function apply(ctx) {
       postRoute(`${API_PREFIX}/add-provider`, (b) => addProvider(b)),
       postRoute(`${API_PREFIX}/save-provider`, (b) => saveProvider(b)),
       postRoute(`${API_PREFIX}/discover-models`, (b) => discoverModels(b)),
+      postRoute(`${API_PREFIX}/refresh-models`, (b) => refreshProviderModels(b)),
+      postRoute(`${API_PREFIX}/add-models`, (b) => addProviderModels(b)),
       postRoute(`${API_PREFIX}/enrich-models`, (b) => enrichProviderModels(b)),
       postRoute(`${API_PREFIX}/save-catalog-url`, (b) => saveCatalogUrl(b)),
       postRoute(`${API_PREFIX}/save-provider-retry`, (b) => saveProviderRetry(b)),

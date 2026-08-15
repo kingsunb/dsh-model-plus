@@ -54,6 +54,8 @@ window.__ModuleLoader__.load({
       addProvider: (args) => plusFetch(API + '/add-provider', args),
       saveProvider: (args) => plusFetch(API + '/save-provider', args),
       discoverModels: (args) => plusFetch(API + '/discover-models', args),
+      refreshModels: (args) => plusFetch(API + '/refresh-models', args),
+      addModels: (args) => plusFetch(API + '/add-models', args),
       enrichModels: (args) => plusFetch(API + '/enrich-models', args),
       saveCatalogUrl: (args) => plusFetch(API + '/save-catalog-url', args),
       saveProviderRetry: (args) => plusFetch(API + '/save-provider-retry', args),
@@ -371,6 +373,11 @@ window.__ModuleLoader__.load({
       const [overwriteEfforts, setOverwriteEfforts] = React.useState(false)
       const [catalogUrl, setCatalogUrl] = React.useState('https://models.dev/api.json')
       const [quickResult, setQuickResult] = React.useState(null)
+      const [refreshBusy, setRefreshBusy] = React.useState(false)
+      const [refreshError, setRefreshError] = React.useState('')
+      const [refreshCandidates, setRefreshCandidates] = React.useState(null)
+      const [refreshPicked, setRefreshPicked] = React.useState({})
+      const [refreshInfo, setRefreshInfo] = React.useState(null)
       const [updateInfo, setUpdateInfo] = React.useState(null)
       const [checking, setChecking] = React.useState(false)
       const [showAdd, setShowAdd] = React.useState(false)
@@ -523,6 +530,10 @@ window.__ModuleLoader__.load({
         setRetryDraft('')
         setShowEdit(false)
         setEditKey('')
+        setRefreshCandidates(null)
+        setRefreshPicked({})
+        setRefreshInfo(null)
+        setRefreshError('')
         try { await loadDetail(next) } catch (e) { setError(e && e.message ? e.message : String(e)) } finally { setBusy(false) }
       }
 
@@ -857,6 +868,93 @@ window.__ModuleLoader__.load({
         finally { setBusy(false) }
       }
 
+      const runRefreshModels = async () => {
+        if (!provider) { setError('请先选择供应商'); return }
+        setRefreshBusy(true); setRefreshError(''); setOkMsg(''); setError('')
+        try {
+          const res = await api.refreshModels({ provider: provider })
+          const found = res.candidates || []
+          setRefreshCandidates(found)
+          setRefreshInfo(res)
+          // 默认只勾选「新增」——对齐官方
+          const picked = {}
+          for (const m of found) {
+            if (m && m.id) picked[m.id] = !!m.isNew
+          }
+          setRefreshPicked(picked)
+          setOkMsg(res.message || ('已获取 ' + found.length + ' 个模型'))
+        } catch (e) {
+          setRefreshCandidates(null)
+          setRefreshPicked({})
+          setRefreshInfo(null)
+          setRefreshError(e && e.message ? e.message : String(e))
+          setError(e && e.message ? e.message : String(e))
+        } finally {
+          setRefreshBusy(false)
+        }
+      }
+
+      const toggleRefreshPick = (id) => {
+        setRefreshPicked((prev) => {
+          const next = Object.assign({}, prev)
+          next[id] = !next[id]
+          return next
+        })
+      }
+
+      const pickRefreshAllNew = () => {
+        if (!refreshCandidates) return
+        const next = {}
+        for (const m of refreshCandidates) {
+          if (m && m.id) next[m.id] = !!m.isNew
+        }
+        setRefreshPicked(next)
+      }
+
+      const pickRefreshAll = (on) => {
+        if (!refreshCandidates) return
+        const next = {}
+        for (const m of refreshCandidates) if (m && m.id) next[m.id] = !!on
+        setRefreshPicked(next)
+      }
+
+      const confirmAddRefreshedModels = async () => {
+        if (!provider) return
+        const selectedModels = []
+        for (const m of (refreshCandidates || [])) {
+          if (!m || !m.id || !refreshPicked[m.id]) continue
+          // 只追加新增；已有的即使勾了也跳过（host 也会去重）
+          if (m.isNew === false) continue
+          const row = { id: m.id }
+          if (m.name) row.name = m.name
+          if (typeof m.contextWindow === 'number' && m.contextWindow > 0) row.contextWindow = m.contextWindow
+          if (typeof m.maxTokens === 'number' && m.maxTokens > 0) row.maxTokens = m.maxTokens
+          if (Array.isArray(m.input) && m.input.length) row.input = m.input
+          if (m.reasoningEfforts === false || (m.reasoningEfforts && typeof m.reasoningEfforts === 'object')) {
+            row.reasoningEfforts = m.reasoningEfforts
+          }
+          selectedModels.push(row)
+        }
+        if (!selectedModels.length) {
+          setError('请至少勾选一个新增模型')
+          return
+        }
+        setRefreshBusy(true); setError(''); setOkMsg('')
+        try {
+          const res = await api.addModels({ provider: provider, models: selectedModels })
+          setOkMsg(res.message || ('已新增 ' + (res.addedCount || 0) + ' 个模型'))
+          setRefreshCandidates(null)
+          setRefreshPicked({})
+          setRefreshInfo(null)
+          await loadDetail(provider)
+          setBoot(await api.bootstrap())
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e))
+        } finally {
+          setRefreshBusy(false)
+        }
+      }
+
       const saveCatalogUrl = async () => {
         setBusy(true); setError(''); setOkMsg('')
         try {
@@ -1105,24 +1203,100 @@ window.__ModuleLoader__.load({
         React.createElement('h2', { className: 'mp-h' }, '模型 Plus'),
         React.createElement('p', { className: 'mp-sub' }, (boot && boot.note) || ''),
 
-        React.createElement('div', { className: 'mp-card mp-quick' },
+        React.createElement('div', { className: 'mp-card mp-quick', style: { flexDirection: 'column', alignItems: 'stretch' } },
           React.createElement('div', { className: 'mp-quick-main' },
             React.createElement('div', { className: 'mp-quick-text' },
-              React.createElement('strong', null, '一键同步'),
-              React.createElement('span', { className: 'mp-muted' }, '按模型 id 补全思考强度 / 上下文 / 视觉，并写回当前供应商'),
+              React.createElement('strong', null, '一键同步 / 更新模型'),
+              React.createElement('span', { className: 'mp-muted' },
+                '同步：补全思考强度/上下文/视觉。更新：拉取端点模型列表，勾选新增后确认写入。'),
             ),
-            React.createElement('button', {
-              type: 'button', className: 'mp-btn primary mp-quick-btn',
-              disabled: busy || enrichBusy || !provider || !(boot && boot.writable),
-              title: provider ? ('同步到：' + provider) : '请先选择供应商',
-              onClick: quickSync,
-            }, (busy || enrichBusy) ? '同步中…' : '一键同步'),
+            React.createElement('div', { className: 'mp-actions' },
+              React.createElement('button', {
+                type: 'button', className: 'mp-btn primary mp-quick-btn',
+                disabled: busy || enrichBusy || refreshBusy || !provider || !(boot && boot.writable),
+                title: provider ? ('同步到：' + provider) : '请先选择供应商',
+                onClick: quickSync,
+              }, (busy || enrichBusy) ? '同步中…' : '一键同步'),
+              React.createElement('button', {
+                type: 'button', className: 'mp-btn mp-quick-btn',
+                disabled: busy || enrichBusy || refreshBusy || !provider,
+                title: provider ? ('更新模型列表：' + provider) : '请先选择供应商',
+                onClick: runRefreshModels,
+              }, refreshBusy ? '更新中…' : '更新'),
+            ),
           ),
           quickResult && React.createElement('div', { className: 'mp-muted mp-quick-result' },
             quickResult.error
               ? '同步失败：' + quickResult.error
               : ((quickResult.message || ('变更 ' + (quickResult.changeCount || 0)))
                 + (quickResult.hitCount != null ? (' · 命中 ' + quickResult.hitCount + '/' + (quickResult.localCount || 0)) : '')),
+          ),
+          refreshError && React.createElement('p', { className: 'mp-error', style: { margin: 0 } }, refreshError),
+          refreshCandidates && React.createElement('div', { className: 'mp-field', style: { marginTop: 4 } },
+            React.createElement('div', { className: 'mp-discover-head' },
+              React.createElement('span', { className: 'mp-muted' },
+                (refreshInfo && refreshInfo.message)
+                || ('共 ' + refreshCandidates.length + ' 个')
+                + ' · 已选 '
+                + refreshCandidates.filter((m) => m && m.id && refreshPicked[m.id] && m.isNew).length
+                + ' 新增',
+              ),
+              React.createElement('div', { className: 'mp-actions' },
+                React.createElement('button', {
+                  type: 'button', className: 'mp-linkbtn', disabled: busy || refreshBusy,
+                  onClick: pickRefreshAllNew,
+                }, '只选新增'),
+                React.createElement('button', {
+                  type: 'button', className: 'mp-linkbtn', disabled: busy || refreshBusy,
+                  onClick: () => pickRefreshAll(true),
+                }, '全选'),
+                React.createElement('button', {
+                  type: 'button', className: 'mp-linkbtn', disabled: busy || refreshBusy,
+                  onClick: () => pickRefreshAll(false),
+                }, '全不选'),
+                React.createElement('button', {
+                  type: 'button', className: 'mp-linkbtn', disabled: busy || refreshBusy,
+                  onClick: () => {
+                    setRefreshCandidates(null)
+                    setRefreshPicked({})
+                    setRefreshInfo(null)
+                    setRefreshError('')
+                  },
+                }, '关闭'),
+              ),
+            ),
+            React.createElement('div', { className: 'mp-discover-box' },
+              refreshCandidates.map((m) => React.createElement('div', { key: m.id, className: 'mp-discover-item' },
+                React.createElement('label', null,
+                  React.createElement('input', {
+                    type: 'checkbox',
+                    checked: !!refreshPicked[m.id],
+                    disabled: busy || refreshBusy || m.isNew === false,
+                    onChange: () => toggleRefreshPick(m.id),
+                  }),
+                  React.createElement('span', null,
+                    React.createElement('div', null,
+                      m.id,
+                      m.isNew
+                        ? React.createElement('span', { className: 'mp-pill', style: { marginLeft: 6 } }, '新增')
+                        : React.createElement('span', { className: 'mp-muted', style: { marginLeft: 6 } }, '已有'),
+                    ),
+                    React.createElement('div', { className: 'mp-discover-meta' },
+                      [m.name, m.contextWindow ? ('ctx ' + m.contextWindow) : '', m.maxTokens ? ('max ' + m.maxTokens) : '']
+                        .filter(Boolean).join(' · ') || '无附加字段',
+                    ),
+                  ),
+                ),
+              )),
+            ),
+            React.createElement('div', { className: 'mp-actions', style: { marginTop: 8 } },
+              React.createElement('button', {
+                type: 'button', className: 'mp-btn primary',
+                disabled: busy || refreshBusy || !(boot && boot.writable)
+                  || !refreshCandidates.some((m) => m && m.id && m.isNew && refreshPicked[m.id]),
+                onClick: confirmAddRefreshedModels,
+              }, refreshBusy ? '写入中…' : '确认添加所选新增模型'),
+            ),
           ),
         ),
 
@@ -1160,7 +1334,6 @@ window.__ModuleLoader__.load({
                 openEditProvider()
               },
             }, showEdit ? '收起编辑' : '编辑供应商'),
-            React.createElement('button', { type: 'button', className: 'mp-btn', disabled: busy, onClick: reload }, '刷新'),
           ),
           selected && React.createElement('div', { className: 'mp-prov' },
             React.createElement('div', {
@@ -1200,7 +1373,7 @@ window.__ModuleLoader__.load({
                   className: 'mp-btn small primary',
                   disabled: busy || retryBusy || editBusy || !(boot && boot.writable),
                   onClick: saveSelectedRetry,
-                }, retryBusy ? '保存中…' : '保存重试'),
+                }, retryBusy ? '保存中…' : '保存'),
               ),
             ),
           ),
