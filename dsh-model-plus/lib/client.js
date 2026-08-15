@@ -52,9 +52,11 @@ window.__ModuleLoader__.load({
       saveModel: (args) => plusFetch(API + '/save-model', args),
       applyPreset: (args) => plusFetch(API + '/apply-preset', args),
       addProvider: (args) => plusFetch(API + '/add-provider', args),
+      saveProvider: (args) => plusFetch(API + '/save-provider', args),
       discoverModels: (args) => plusFetch(API + '/discover-models', args),
       enrichModels: (args) => plusFetch(API + '/enrich-models', args),
       saveCatalogUrl: (args) => plusFetch(API + '/save-catalog-url', args),
+      saveProviderRetry: (args) => plusFetch(API + '/save-provider-retry', args),
       testModel: (args) => plusFetch(API + '/test-model', args),
       checkUpdate: () => plusFetch(API + '/check-update'),
     };
@@ -372,14 +374,24 @@ window.__ModuleLoader__.load({
       const [updateInfo, setUpdateInfo] = React.useState(null)
       const [checking, setChecking] = React.useState(false)
       const [showAdd, setShowAdd] = React.useState(false)
+      const [showEdit, setShowEdit] = React.useState(false)
       const [addRoute, setAddRoute] = React.useState('')
       const [addName, setAddName] = React.useState('')
       const [addBaseURL, setAddBaseURL] = React.useState('')
       const [addApi, setAddApi] = React.useState('openai-completions')
       const [addKey, setAddKey] = React.useState('')
+      const [addMaxRetries, setAddMaxRetries] = React.useState(2)
       const [addModelsText, setAddModelsText] = React.useState('')
       const [addModelRows, setAddModelRows] = React.useState([{ id: '', name: '' }])
       const [addShowManual, setAddShowManual] = React.useState(false)
+      const [retryDraft, setRetryDraft] = React.useState('')
+      const [retryBusy, setRetryBusy] = React.useState(false)
+      const [editName, setEditName] = React.useState('')
+      const [editBaseURL, setEditBaseURL] = React.useState('')
+      const [editApi, setEditApi] = React.useState('openai-completions')
+      const [editKey, setEditKey] = React.useState('')
+      const [editMaxRetries, setEditMaxRetries] = React.useState('2')
+      const [editBusy, setEditBusy] = React.useState(false)
       const [addImportText, setAddImportText] = React.useState('')
       const [addImportMsg, setAddImportMsg] = React.useState('')
       const [addImportErr, setAddImportErr] = React.useState('')
@@ -446,6 +458,9 @@ window.__ModuleLoader__.load({
           const b = await api.bootstrap()
           setBoot(b)
           setCatalogUrl(b.modelsDevUrl || b.defaultModelsDevUrl || b.defaultModelsUrl || 'https://models.dev/api.json')
+          if (b.defaultProviderMaxRetries != null) {
+            setAddMaxRetries((prev) => (prev === 2 || prev === '' || prev == null) ? b.defaultProviderMaxRetries : prev)
+          }
           if (b.defaultTestPrompt) {
             setTestPrompt((prev) => (!prev || prev === FALLBACK_TEST_PROMPT) ? b.defaultTestPrompt : prev)
           }
@@ -463,12 +478,117 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { reload() }, [])
 
+      const defaultRetryN = () => (
+        (boot && boot.defaultProviderMaxRetries != null) ? Number(boot.defaultProviderMaxRetries) : 2
+      )
+
+      const effectiveRetryOf = (row) => {
+        if (!row) return defaultRetryN()
+        if (row.retryEffectiveMaxRetries != null) return row.retryEffectiveMaxRetries
+        if (row.retryConfigured && row.retryMaxRetries != null) return row.retryMaxRetries
+        return defaultRetryN()
+      }
+
+      const fillEditFromSelected = (row) => {
+        if (!row) {
+          setEditName('')
+          setEditBaseURL('')
+          setEditApi('openai-completions')
+          setEditKey('')
+          setEditMaxRetries(String(defaultRetryN()))
+          return
+        }
+        setEditName(row.displayName && row.displayName !== row.provider ? row.displayName : '')
+        setEditBaseURL(row.baseURL || '')
+        setEditApi(row.api || 'openai-completions')
+        setEditKey('')
+        setEditMaxRetries(String(effectiveRetryOf(row)))
+      }
+
+      const openEditProvider = () => {
+        const row = ((boot && boot.providers) || []).find((p) => p.provider === provider)
+          || { provider: provider, displayName: provider, baseURL: '', api: 'openai-completions' }
+        fillEditFromSelected(row)
+        setShowEdit(true)
+        setShowAdd(false)
+        setError('')
+        setOkMsg('')
+      }
+
       const switchProvider = async (next) => {
         setProvider(next); setOkMsg(''); setError(''); setBusy(true)
         testStopRef.current = true
         setTestResults({}); setTestProgress(''); setTestBusyMap({}); setTestBatch(false); setTestEffortByModel({})
         setEnrichPreview(null)
+        setRetryDraft('')
+        setShowEdit(false)
+        setEditKey('')
         try { await loadDetail(next) } catch (e) { setError(e && e.message ? e.message : String(e)) } finally { setBusy(false) }
+      }
+
+      const saveEditProvider = async () => {
+        if (!provider) return
+        setEditBusy(true); setError(''); setOkMsg('')
+        try {
+          const rawRetry = String(editMaxRetries == null ? '' : editMaxRetries).trim()
+          const maxRetries = rawRetry === '' ? defaultRetryN() : Number(rawRetry)
+          if (!Number.isFinite(maxRetries) || !Number.isInteger(maxRetries) || maxRetries < 0) {
+            throw new Error('重试次数须为非负整数')
+          }
+          if (!String(editBaseURL || '').trim()) throw new Error('baseURL 不能为空')
+          const payload = {
+            provider: provider,
+            displayName: editName.trim(),
+            baseURL: editBaseURL.trim(),
+            api: editApi,
+            maxRetries: maxRetries,
+          }
+          if (String(editKey || '').trim()) payload.apiKey = editKey
+          const res = await api.saveProvider(payload)
+          setOkMsg(res.message || '已保存供应商')
+          if (res.warning) setError(res.warning)
+          setEditKey('')
+          setShowEdit(false)
+          const b = await api.bootstrap()
+          setBoot(b)
+          const row = (b.providers || []).find((p) => p.provider === provider)
+          if (row) {
+            setRetryDraft(String(effectiveRetryOf(row)))
+            fillEditFromSelected(row)
+          }
+          await loadDetail(provider)
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e))
+        } finally {
+          setEditBusy(false)
+        }
+      }
+
+      const saveSelectedRetry = async () => {
+        if (!provider) return
+        setRetryBusy(true); setError(''); setOkMsg('')
+        try {
+          const raw = String(retryDraft == null ? '' : retryDraft).trim()
+          // 空 → 按默认 2 写入（界面始终显示数字，不显示「默认」）
+          const n = raw === '' ? defaultRetryN() : Number(raw)
+          if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+            throw new Error('重试次数须为非负整数')
+          }
+          const res = await api.saveProviderRetry({
+            provider: provider,
+            mode: 'normal',
+            maxRetries: n,
+          })
+          setOkMsg(res.message || '已保存重试次数')
+          const b = await api.bootstrap()
+          setBoot(b)
+          const row = (b.providers || []).find((p) => p.provider === provider)
+          setRetryDraft(String(effectiveRetryOf(row)))
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e))
+        } finally {
+          setRetryBusy(false)
+        }
       }
 
       const markTestBusy = (modelId, on) => {
@@ -767,6 +887,7 @@ window.__ModuleLoader__.load({
         setAddBaseURL('')
         setAddApi('openai-completions')
         setAddKey('')
+        setAddMaxRetries((boot && boot.defaultProviderMaxRetries != null) ? boot.defaultProviderMaxRetries : 2)
         setAddModelsText('')
         setAddModelRows([{ id: '', name: '' }])
         setAddShowManual(false)
@@ -950,6 +1071,9 @@ window.__ModuleLoader__.load({
             baseURL: addBaseURL.trim(),
             api: addApi,
             apiKey: addKey,
+            maxRetries: addMaxRetries === '' || addMaxRetries == null
+              ? ((boot && boot.defaultProviderMaxRetries) || 2)
+              : Number(addMaxRetries),
           }
           if (models.length) payload.models = models
           const res = await api.addProvider(payload)
@@ -1019,18 +1143,144 @@ window.__ModuleLoader__.load({
               }, !providers.length
                 ? React.createElement('option', { value: '' }, '无供应商')
                 : providers.map((p) => React.createElement('option', { key: p.provider, value: p.provider },
-                  (p.displayName || p.provider) + ' · 强度 ' + (p.withEffort || 0) + '/' + (p.modelCount || 0) + ' · 视觉 ' + (p.withVision || 0)))),
+                  (p.displayName || p.provider)
+                    + ' · 强度 ' + (p.withEffort || 0) + '/' + (p.modelCount || 0)
+                    + ' · 视觉 ' + (p.withVision || 0)
+                    + (' · 重试 ' + effectiveRetryOf(p))))),
             ),
             React.createElement('button', {
               type: 'button', className: 'mp-btn primary', disabled: busy || !(boot && boot.writable),
-              onClick: () => { setShowAdd((v) => !v); setError(''); setOkMsg('') },
+              onClick: () => { setShowAdd((v) => !v); setShowEdit(false); setError(''); setOkMsg('') },
             }, showAdd ? '收起添加' : '添加供应商'),
+            React.createElement('button', {
+              type: 'button', className: 'mp-btn',
+              disabled: busy || !provider || !(boot && boot.writable),
+              onClick: () => {
+                if (showEdit) { setShowEdit(false); return }
+                openEditProvider()
+              },
+            }, showEdit ? '收起编辑' : '编辑供应商'),
             React.createElement('button', { type: 'button', className: 'mp-btn', disabled: busy, onClick: reload }, '刷新'),
           ),
           selected && React.createElement('div', { className: 'mp-prov' },
-            React.createElement('div', null, React.createElement('strong', null, selected.displayName || selected.provider)),
-            React.createElement('div', { className: 'mp-muted' },
-              (selected.baseURL || '无 baseURL') + (selected.api ? (' · ' + selected.api) : ''),
+            React.createElement('div', {
+              style: { display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', justifyContent: 'space-between' },
+            },
+              React.createElement('div', { style: { minWidth: 0, flex: '1 1 220px' } },
+                React.createElement('div', null, React.createElement('strong', null, selected.displayName || selected.provider)),
+                React.createElement('div', { className: 'mp-muted' },
+                  (selected.baseURL || '无 baseURL')
+                  + (selected.api ? (' · ' + selected.api) : '')
+                  + (' · 重试 ' + effectiveRetryOf(selected)),
+                ),
+              ),
+              React.createElement('div', {
+                className: 'mp-actions',
+                style: { alignItems: 'center', flex: '0 0 auto' },
+              },
+                React.createElement('span', { className: 'mp-label', style: { margin: 0 } }, '重试次数'),
+                React.createElement('input', {
+                  className: 'mp-input',
+                  type: 'number',
+                  min: 0,
+                  step: 1,
+                  inputMode: 'numeric',
+                  style: { width: 96 },
+                  disabled: busy || retryBusy || editBusy || !(boot && boot.writable),
+                  placeholder: String(defaultRetryN()),
+                  title: '默认 ' + defaultRetryN() + '；改成其它数字后点保存',
+                  value: (function () {
+                    if (retryDraft !== '') return retryDraft
+                    return String(effectiveRetryOf(selected))
+                  })(),
+                  onChange: (ev) => setRetryDraft(ev.target.value),
+                }),
+                React.createElement('button', {
+                  type: 'button',
+                  className: 'mp-btn small primary',
+                  disabled: busy || retryBusy || editBusy || !(boot && boot.writable),
+                  onClick: saveSelectedRetry,
+                }, retryBusy ? '保存中…' : '保存重试'),
+              ),
+            ),
+          ),
+          showEdit && selected && React.createElement('div', { className: 'mp-prov', style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+            React.createElement('strong', null, '编辑供应商'),
+            React.createElement('p', { className: 'mp-muted', style: { margin: 0 } },
+              '可改显示名 / baseURL / 协议 / API Key / 重试次数。Provider ID（' + selected.provider + '）不可改。',
+            ),
+            React.createElement('div', { className: 'mp-field-pair' },
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, 'Provider ID'),
+                React.createElement('input', {
+                  className: 'mp-input', value: selected.provider, disabled: true,
+                }),
+                React.createElement('span', { className: 'mp-field-hint' }, '创建后不可修改'),
+              ),
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, '显示名称（可选）'),
+                React.createElement('input', {
+                  className: 'mp-input', value: editName, disabled: busy || editBusy,
+                  placeholder: selected.provider,
+                  onChange: (ev) => setEditName(ev.target.value),
+                }),
+                React.createElement('span', { className: 'mp-field-hint' }, '空则界面显示 ID'),
+              ),
+            ),
+            React.createElement('div', { className: 'mp-field-pair' },
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, 'API 地址 baseURL（必填）'),
+                React.createElement('input', {
+                  className: 'mp-input', value: editBaseURL, disabled: busy || editBusy,
+                  placeholder: 'https://gateway.example/v1',
+                  onChange: (ev) => setEditBaseURL(ev.target.value),
+                }),
+              ),
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, 'API 协议'),
+                React.createElement('select', {
+                  className: 'mp-select', value: editApi, disabled: busy || editBusy,
+                  onChange: (ev) => setEditApi(ev.target.value),
+                }, ((boot && boot.protocols) || ['openai-completions', 'openai-responses', 'anthropic-messages']).map((p) =>
+                  React.createElement('option', { key: p, value: p }, p))),
+              ),
+            ),
+            React.createElement('div', { className: 'mp-field-pair' },
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, 'API Key（留空不改）'),
+                React.createElement('input', {
+                  className: 'mp-input', type: 'password', autoComplete: 'off',
+                  value: editKey, disabled: busy || editBusy,
+                  placeholder: (boot && boot.canStoreApiKey) ? '不修改请留空' : '当前环境可能无法写入凭据',
+                  onChange: (ev) => setEditKey(ev.target.value),
+                }),
+              ),
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, '重试次数 maxRetries'),
+                React.createElement('input', {
+                  className: 'mp-input',
+                  type: 'number',
+                  min: 0,
+                  step: 1,
+                  inputMode: 'numeric',
+                  value: editMaxRetries,
+                  disabled: busy || editBusy,
+                  placeholder: String(defaultRetryN()),
+                  onChange: (ev) => setEditMaxRetries(ev.target.value),
+                }),
+                React.createElement('span', { className: 'mp-field-hint' }, '默认 ' + defaultRetryN()),
+              ),
+            ),
+            React.createElement('div', { className: 'mp-actions' },
+              React.createElement('button', {
+                type: 'button', className: 'mp-btn primary',
+                disabled: busy || editBusy || !(boot && boot.writable) || !String(editBaseURL || '').trim(),
+                onClick: saveEditProvider,
+              }, editBusy ? '保存中…' : '保存供应商'),
+              React.createElement('button', {
+                type: 'button', className: 'mp-btn', disabled: busy || editBusy,
+                onClick: () => { setShowEdit(false); setEditKey('') },
+              }, '取消'),
             ),
           ),
           showAdd && React.createElement('div', { className: 'mp-prov', style: { display: 'flex', flexDirection: 'column', gap: 10 } },
@@ -1138,16 +1388,39 @@ window.__ModuleLoader__.load({
                   addApiListable ? '支持「获取模型」' : '需手填模型 id'),
               ),
             ),
-            React.createElement('div', { className: 'mp-field' },
-              React.createElement('span', { className: 'mp-label' }, 'API Key（可选，探测时一并带上）'),
-              React.createElement('input', {
-                className: 'mp-input', type: 'password', autoComplete: 'off',
-                value: addKey, disabled: busy || discoverBusy,
-                placeholder: (boot && boot.canStoreApiKey) ? 'sk-…（保存到凭据库）' : '当前环境可能无法写入凭据，可稍后在官方模型页补填',
-                onChange: (ev) => setAddKey(ev.target.value),
-              }),
-              !(boot && boot.canStoreApiKey) && React.createElement('span', { className: 'mp-warn' },
-                '未检测到 credentials 服务：仍可创建提供方，但 Key 不会落盘。'),
+            React.createElement('div', { className: 'mp-field-pair' },
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, 'API Key（可选，探测时一并带上）'),
+                React.createElement('input', {
+                  className: 'mp-input', type: 'password', autoComplete: 'off',
+                  value: addKey, disabled: busy || discoverBusy,
+                  placeholder: (boot && boot.canStoreApiKey) ? 'sk-…（保存到凭据库）' : '当前环境可能无法写入凭据，可稍后在官方模型页补填',
+                  onChange: (ev) => setAddKey(ev.target.value),
+                }),
+                !(boot && boot.canStoreApiKey) && React.createElement('span', { className: 'mp-warn' },
+                  '未检测到 credentials 服务：仍可创建提供方，但 Key 不会落盘。'),
+              ),
+              React.createElement('div', { className: 'mp-field' },
+                React.createElement('span', { className: 'mp-label' }, '重试次数 maxRetries'),
+                React.createElement('input', {
+                  className: 'mp-input',
+                  type: 'number',
+                  min: 0,
+                  step: 1,
+                  inputMode: 'numeric',
+                  value: addMaxRetries === '' || addMaxRetries == null ? '' : String(addMaxRetries),
+                  disabled: busy || discoverBusy,
+                  placeholder: String((boot && boot.defaultProviderMaxRetries) != null ? boot.defaultProviderMaxRetries : 2),
+                  onChange: (ev) => {
+                    const v = ev.target.value
+                    if (v === '') setAddMaxRetries('')
+                    else setAddMaxRetries(v)
+                  },
+                }),
+                React.createElement('span', { className: 'mp-field-hint' },
+                  '手填非负整数，默认 '
+                  + String((boot && boot.defaultProviderMaxRetries) != null ? boot.defaultProviderMaxRetries : 2)),
+              ),
             ),
             React.createElement('div', { className: 'mp-field' },
               React.createElement('div', { className: 'mp-discover-head' },

@@ -31,7 +31,10 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.27'
+const VERSION = '0.1.32'
+/** 新建供应商默认重试次数（写入 retryPolicy.maxRetries）。平台默认也是 2。 */
+const DEFAULT_PROVIDER_MAX_RETRIES = 2
+const MAX_PROVIDER_MAX_RETRIES = 50
 /** 模型测试超时：10 分钟（推理 + 长 SVG 输出可能很慢）。 */
 const TEST_TIMEOUT_MS = 10 * 60 * 1000
 const MAX_TEST_BYTES = 1024 * 1024
@@ -262,6 +265,73 @@ export function apply(ctx) {
     }
   }
 
+  function readRetryPolicyView(profile) {
+    const rp = asObject(profile && profile.retryPolicy)
+    // 未配置时 UI 仍展示默认次数 2（与平台/插件默认一致），不显示「默认」文案
+    if (!Object.keys(rp).length) {
+      return {
+        configured: false,
+        mode: 'normal',
+        maxRetries: DEFAULT_PROVIDER_MAX_RETRIES,
+        effectiveMaxRetries: DEFAULT_PROVIDER_MAX_RETRIES,
+        label: String(DEFAULT_PROVIDER_MAX_RETRIES),
+      }
+    }
+    const mode = str(rp.mode, 'normal') || 'normal'
+    let maxRetries = null
+    if (mode === 'always') {
+      return {
+        configured: true,
+        mode: 'always',
+        maxRetries: null,
+        effectiveMaxRetries: DEFAULT_PROVIDER_MAX_RETRIES,
+        label: 'always',
+      }
+    }
+    if (typeof rp.maxRetries === 'number' && Number.isFinite(rp.maxRetries)) {
+      maxRetries = Math.max(0, Math.floor(rp.maxRetries))
+    }
+    const effective = maxRetries == null ? DEFAULT_PROVIDER_MAX_RETRIES : maxRetries
+    return {
+      configured: true,
+      mode: 'normal',
+      maxRetries: maxRetries,
+      effectiveMaxRetries: effective,
+      label: String(effective),
+    }
+  }
+
+  function normalizeRetryPolicyInput(args) {
+    // clear: true → 删除 retryPolicy，回到平台默认
+    if (args && args.clear === true) return { clear: true, value: undefined }
+    if (args && (args.retryPolicy === null || args.retryPolicy === false)) return { clear: true, value: undefined }
+
+    // 允许只传 maxRetries 数字
+    let mode = str(args && (args.mode || (args.retryPolicy && args.retryPolicy.mode)), 'normal').trim() || 'normal'
+    if (mode !== 'normal' && mode !== 'always') throw new Error('retryPolicy.mode 仅支持 normal / always')
+
+    if (mode === 'always') {
+      return { clear: false, value: { mode: 'always' } }
+    }
+
+    let maxRetries = args && args.maxRetries
+    if (maxRetries === undefined && args && args.retryPolicy && typeof args.retryPolicy === 'object') {
+      maxRetries = args.retryPolicy.maxRetries
+    }
+    if (maxRetries === '' || maxRetries === null || maxRetries === undefined) {
+      // 显式 normal 但不给次数 → 用插件默认 2
+      maxRetries = DEFAULT_PROVIDER_MAX_RETRIES
+    }
+    maxRetries = Number(maxRetries)
+    if (!Number.isFinite(maxRetries) || !Number.isInteger(maxRetries) || maxRetries < 0) {
+      throw new Error('maxRetries 须为 >= 0 的整数')
+    }
+    if (maxRetries > MAX_PROVIDER_MAX_RETRIES) {
+      throw new Error('maxRetries 最大 ' + MAX_PROVIDER_MAX_RETRIES)
+    }
+    return { clear: false, value: { mode: 'normal', maxRetries: maxRetries } }
+  }
+
   function listProviders() {
     const providers = asObject(readPiAi().providers)
     return Object.keys(providers).sort().map((id) => {
@@ -272,9 +342,15 @@ export function apply(ctx) {
         if (m.reasoningEfforts && m.reasoningEfforts !== false && typeof m.reasoningEfforts === 'object' && Object.keys(m.reasoningEfforts).length) withEffort += 1
         if (hasVision(m)) withVision += 1
       }
+      const retry = readRetryPolicyView(p)
       return {
         provider: id, displayName: str(p.displayName, id), baseURL: str(p.baseURL, ''), api: str(p.api, ''),
         modelCount: models.length, withEffort: withEffort, withVision: withVision,
+        retryConfigured: retry.configured,
+        retryMode: retry.mode,
+        retryMaxRetries: retry.maxRetries,
+        retryEffectiveMaxRetries: retry.effectiveMaxRetries,
+        retryLabel: retry.label,
       }
     })
   }
@@ -343,6 +419,9 @@ export function apply(ctx) {
         baseURL: prev.baseURL || profileNow.baseURL,
         models: models,
       })
+      // 保留已有 retryPolicy，避免 replace 整层时丢掉
+      if (prev.retryPolicy !== undefined) nextProfile.retryPolicy = prev.retryPolicy
+      else if (profileNow.retryPolicy !== undefined) nextProfile.retryPolicy = profileNow.retryPolicy
       user.providers[provider] = nextProfile
       await ctx.settings.replace(NS, H(user))
       return 'replace'
@@ -1549,6 +1628,257 @@ export function apply(ctx) {
     }
   }
 
+  /**
+   * 写入/清除供应商 retryPolicy（llm-pi-ai.providers.<id>.retryPolicy）。
+   * 形态：{ mode: 'normal', maxRetries: N } 或 clear 回平台默认。
+   */
+  async function saveProviderRetry(args) {
+    const provider = str(args && args.provider, '').trim()
+    if (!provider) throw new Error('缺少 provider')
+    if (!ctx.settings.writable) throw new Error('settings 只读')
+    const profile = asObject(asObject(readPiAi().providers)[provider])
+    if (!Object.keys(profile).length) throw new Error('供应商未配置: ' + provider)
+
+    const norm = normalizeRetryPolicyInput(args || {})
+    refreshHostProto()
+    const errors = []
+
+    if (norm.clear) {
+      try {
+        const op = Object.assign(H({ op: 'unset', path: ['providers', provider, 'retryPolicy'] }), {
+          op: 'unset',
+          path: ['providers', String(provider), 'retryPolicy'],
+        })
+        await ctx.settings.mutate(NS, [op])
+        return {
+          ok: true,
+          provider: provider,
+          cleared: true,
+          retryConfigured: false,
+          retryMaxRetries: null,
+          retryMode: '',
+          message: '已清除 ' + provider + ' 的 retryPolicy（回平台默认）',
+          providers: listProviders(),
+        }
+      } catch (e) {
+        errors.push('mutate-unset:' + (e && e.message ? e.message : String(e)))
+      }
+      try {
+        const user = getUserLayer() || { providers: {} }
+        if (!user.providers || typeof user.providers !== 'object') user.providers = {}
+        const prev = user.providers[provider] && typeof user.providers[provider] === 'object' ? user.providers[provider] : {}
+        const next = Object.assign({}, prev)
+        delete next.retryPolicy
+        user.providers[provider] = next
+        await ctx.settings.replace(NS, H(user))
+        return {
+          ok: true,
+          provider: provider,
+          cleared: true,
+          retryConfigured: false,
+          retryMaxRetries: null,
+          retryMode: '',
+          message: '已清除 ' + provider + ' 的 retryPolicy（via replace）',
+          providers: listProviders(),
+        }
+      } catch (e) {
+        errors.push('replace-unset:' + (e && e.message ? e.message : String(e)))
+      }
+      throw new Error('清除 retryPolicy 失败: ' + errors.join(' | '))
+    }
+
+    const value = norm.value
+    try {
+      const op = Object.assign(H({ op: 'set', path: ['providers', provider, 'retryPolicy'], value: value }), {
+        op: 'set',
+        path: ['providers', String(provider), 'retryPolicy'],
+        value: H(value),
+      })
+      await ctx.settings.mutate(NS, [op])
+      const view = readRetryPolicyView({ retryPolicy: value })
+      return {
+        ok: true,
+        provider: provider,
+        cleared: false,
+        retryConfigured: true,
+        retryMode: view.mode,
+        retryMaxRetries: view.maxRetries,
+        retryLabel: view.label,
+        message: '已设置 ' + provider + ' 重试：' + view.label,
+        providers: listProviders(),
+      }
+    } catch (e) {
+      errors.push('mutate:' + (e && e.message ? e.message : String(e)))
+    }
+
+    try {
+      await ctx.settings.update(NS, H({ providers: { [provider]: { retryPolicy: value } } }))
+      const view = readRetryPolicyView({ retryPolicy: value })
+      return {
+        ok: true,
+        provider: provider,
+        cleared: false,
+        retryConfigured: true,
+        retryMode: view.mode,
+        retryMaxRetries: view.maxRetries,
+        retryLabel: view.label,
+        message: '已设置 ' + provider + ' 重试：' + view.label + '（via update）',
+        providers: listProviders(),
+      }
+    } catch (e) {
+      errors.push('update:' + (e && e.message ? e.message : String(e)))
+    }
+
+    try {
+      const user = getUserLayer() || { providers: {} }
+      if (!user.providers || typeof user.providers !== 'object') user.providers = {}
+      const prev = user.providers[provider] && typeof user.providers[provider] === 'object' ? user.providers[provider] : Object.assign({}, profile)
+      user.providers[provider] = Object.assign({}, prev, { retryPolicy: value })
+      await ctx.settings.replace(NS, H(user))
+      const view = readRetryPolicyView({ retryPolicy: value })
+      return {
+        ok: true,
+        provider: provider,
+        cleared: false,
+        retryConfigured: true,
+        retryMode: view.mode,
+        retryMaxRetries: view.maxRetries,
+        retryLabel: view.label,
+        message: '已设置 ' + provider + ' 重试：' + view.label + '（via replace）',
+        providers: listProviders(),
+      }
+    } catch (e) {
+      errors.push('replace:' + (e && e.message ? e.message : String(e)))
+    }
+
+    throw new Error('保存 retryPolicy 失败: ' + errors.join(' | '))
+  }
+
+  /**
+   * 编辑已有供应商：displayName / baseURL / api / API Key / maxRetries。
+   * 不改 Provider ID，不碰 models 列表。
+   */
+  async function saveProvider(args) {
+    const provider = str(args && args.provider, '').trim()
+    if (!provider) throw new Error('缺少 provider')
+    if (!ctx.settings.writable) throw new Error('settings 只读')
+    const current = asObject(asObject(readPiAi().providers)[provider])
+    if (!Object.keys(current).length) throw new Error('供应商未配置: ' + provider)
+
+    const displayName = str(args && args.displayName, '').trim()
+    if (displayName.length > 200) throw new Error('显示名称过长')
+
+    const hasBaseURL = args && Object.prototype.hasOwnProperty.call(args, 'baseURL')
+    const baseURL = hasBaseURL ? validateBaseURL(args.baseURL) : str(current.baseURL, '')
+
+    const hasApi = args && Object.prototype.hasOwnProperty.call(args, 'api')
+    const api = hasApi
+      ? (str(args.api, 'openai-completions').trim() || 'openai-completions')
+      : (str(current.api, 'openai-completions').trim() || 'openai-completions')
+    if (PROTOCOLS.indexOf(api) < 0) throw new Error('不支持的 API 协议: ' + api)
+
+    // 合并 profile：保留 models / retryPolicy / apiKeyEnv / 其它字段
+    const next = Object.assign({}, current, {
+      api: api,
+    })
+    if (baseURL) next.baseURL = baseURL
+    else delete next.baseURL
+
+    if (displayName) next.displayName = displayName
+    else delete next.displayName
+
+    // 可选更新重试
+    if (args && (Object.prototype.hasOwnProperty.call(args, 'maxRetries') || args.clearRetry === true || args.retryPolicy)) {
+      const retryNorm = normalizeRetryPolicyInput(args.clearRetry === true
+        ? { clear: true }
+        : { mode: 'normal', maxRetries: args.maxRetries, retryPolicy: args.retryPolicy })
+      if (retryNorm.clear) delete next.retryPolicy
+      else next.retryPolicy = retryNorm.value
+    }
+
+    // API Key：有新值才写 credentials；并确保 apiKeyEnv 存在
+    const apiKey = validateApiKeyDraft(args && args.apiKey)
+    const keyRefExisting = str(current.apiKeyEnv, '').trim()
+    const keyRef = keyRefExisting || deriveKeyRef(provider)
+    let keyStored = false
+    let keyWarning = ''
+    if (apiKey) {
+      next.apiKeyEnv = keyRef
+      const credentials = ctx.get('credentials')
+      if (!credentials || typeof credentials.set !== 'function') {
+        keyWarning = '供应商已更新，但当前环境无 credentials 服务，API Key 未写入；可设置环境变量 ' + keyRef
+      } else {
+        try {
+          await credentials.set(keyRef, apiKey)
+          keyStored = true
+        } catch (e) {
+          keyWarning = '供应商已更新，但 API Key 写入失败: ' + (e && e.message ? e.message : String(e))
+        }
+      }
+    } else if (keyRefExisting) {
+      next.apiKeyEnv = keyRefExisting
+    }
+
+    refreshHostProto()
+    const errors = []
+    let via = ''
+
+    try {
+      const op = Object.assign(H({ op: 'set', path: ['providers', provider], value: next }), {
+        op: 'set',
+        path: ['providers', String(provider)],
+        value: H(next),
+      })
+      await ctx.settings.mutate(NS, [op])
+      via = 'mutate'
+    } catch (e) {
+      errors.push('mutate:' + (e && e.message ? e.message : String(e)))
+      try {
+        await ctx.settings.update(NS, H({ providers: { [provider]: next } }))
+        via = 'update'
+      } catch (e2) {
+        errors.push('update:' + (e2 && e2.message ? e2.message : String(e2)))
+        try {
+          const user = getUserLayer() || { providers: {} }
+          if (!user.providers || typeof user.providers !== 'object') user.providers = {}
+          const prev = user.providers[provider] && typeof user.providers[provider] === 'object'
+            ? user.providers[provider]
+            : {}
+          user.providers[provider] = Object.assign({}, prev, next)
+          await ctx.settings.replace(NS, H(user))
+          via = 'replace'
+        } catch (e3) {
+          errors.push('replace:' + (e3 && e3.message ? e3.message : String(e3)))
+          throw new Error('保存供应商失败: ' + errors.join(' | '))
+        }
+      }
+    }
+
+    const retry = readRetryPolicyView(next)
+    return {
+      ok: true,
+      provider: provider,
+      displayName: displayName || provider,
+      baseURL: str(next.baseURL, ''),
+      api: api,
+      apiKeyEnv: str(next.apiKeyEnv, ''),
+      keyStored: keyStored,
+      retryConfigured: retry.configured,
+      retryMaxRetries: retry.maxRetries,
+      retryEffectiveMaxRetries: retry.effectiveMaxRetries,
+      retryLabel: retry.label,
+      via: via,
+      message: keyWarning
+        ? ('已保存供应商 ' + provider + '（via ' + via + '）。' + keyWarning)
+        : ('已保存供应商 ' + provider
+          + (keyStored ? '（已更新 API Key）' : '')
+          + ' · 重试 ' + retry.label
+          + ' · via ' + via),
+      warning: keyWarning || undefined,
+      providers: listProviders(),
+    }
+  }
+
   async function addProvider(args) {
     const route = validateRouteId(args && args.route)
     const displayName = str(args && args.displayName, '').trim()
@@ -1583,6 +1913,11 @@ export function apply(ctx) {
     }
     if (displayName) profile.displayName = displayName
     if (storesKey) profile.apiKeyEnv = keyRef
+    // 默认重试：与用户配置示例一致 mode:normal + maxRetries
+    let retryMax = args && args.maxRetries
+    if (retryMax === undefined || retryMax === null || retryMax === '') retryMax = DEFAULT_PROVIDER_MAX_RETRIES
+    const retryNorm = normalizeRetryPolicyInput({ mode: 'normal', maxRetries: retryMax })
+    if (!retryNorm.clear) profile.retryPolicy = retryNorm.value
 
     const via = await writeProviderProfile(route, profile)
 
@@ -1903,7 +2238,8 @@ export function apply(ctx) {
       // 兼容旧字段名
       defaultModelsUrl: MODELS_DEV_URL,
       modelsUrl: readCatalogUrl(),
-      note: '一键同步默认从目录（models.dev 或自定义地址）按模型 id 补全思考强度/上下文/视觉；本地可按供应商编辑，也可添加三方供应商。',
+      defaultProviderMaxRetries: DEFAULT_PROVIDER_MAX_RETRIES,
+      note: '一键同步默认从目录（models.dev 或自定义地址）按模型 id 补全思考强度/上下文/视觉；本地可按供应商编辑，也可添加三方供应商。新建供应商默认 retryPolicy.maxRetries=' + DEFAULT_PROVIDER_MAX_RETRIES + '。',
       repo: 'https://github.com/kingsunb/dsh-model-plus',
       homepage: 'https://github.com/kingsunb/dsh-model-plus#readme',
       issues: 'https://github.com/kingsunb/dsh-model-plus/issues',
@@ -2111,9 +2447,11 @@ export function apply(ctx) {
       postRoute(`${API_PREFIX}/save-model`, (b) => saveModel(b)),
       postRoute(`${API_PREFIX}/apply-preset`, (b) => applyPreset(b)),
       postRoute(`${API_PREFIX}/add-provider`, (b) => addProvider(b)),
+      postRoute(`${API_PREFIX}/save-provider`, (b) => saveProvider(b)),
       postRoute(`${API_PREFIX}/discover-models`, (b) => discoverModels(b)),
       postRoute(`${API_PREFIX}/enrich-models`, (b) => enrichProviderModels(b)),
       postRoute(`${API_PREFIX}/save-catalog-url`, (b) => saveCatalogUrl(b)),
+      postRoute(`${API_PREFIX}/save-provider-retry`, (b) => saveProviderRetry(b)),
       postRoute(`${API_PREFIX}/test-model`, (b) => testModel(b)),
       postRoute(`${API_PREFIX}/save-sync-url`, (b) => saveSyncUrl(b)),
       postRoute(`${API_PREFIX}/sync-preview`, (b) => syncPreview(b)),
