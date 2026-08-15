@@ -416,6 +416,10 @@ window.__ModuleLoader__.load({
       const [testProgress, setTestProgress] = React.useState('')
       const [testResults, setTestResults] = React.useState({})
       const testStopRef = React.useRef(false)
+      /** 「更新模型列表」的单调序号：每次切换供应商或发起新更新都 +1，过期响应按序号丢弃。 */
+      const refreshSeqRef = React.useRef(0)
+      const providerRef = React.useRef(provider)
+      React.useEffect(() => { providerRef.current = provider }, [provider])
       const testBusyCount = Object.keys(testBusyMap || {}).length
       const anyTestBusy = testBusyCount > 0
 
@@ -523,6 +527,8 @@ window.__ModuleLoader__.load({
       }
 
       const switchProvider = async (next) => {
+        // 切换供应商时作废进行中的 refresh，避免旧供应商候选写到新供应商
+        refreshSeqRef.current += 1
         setProvider(next); setOkMsg(''); setError(''); setBusy(true)
         testStopRef.current = true
         setTestResults({}); setTestProgress(''); setTestBusyMap({}); setTestBatch(false); setTestEffortByModel({})
@@ -530,6 +536,7 @@ window.__ModuleLoader__.load({
         setRetryDraft('')
         setShowEdit(false)
         setEditKey('')
+        setRefreshBusy(false)
         setRefreshCandidates(null)
         setRefreshPicked({})
         setRefreshInfo(null)
@@ -870,9 +877,14 @@ window.__ModuleLoader__.load({
 
       const runRefreshModels = async () => {
         if (!provider) { setError('请先选择供应商'); return }
+        const targetProvider = provider
+        refreshSeqRef.current += 1
+        const seq = refreshSeqRef.current
         setRefreshBusy(true); setRefreshError(''); setOkMsg(''); setError('')
         try {
-          const res = await api.refreshModels({ provider: provider })
+          const res = await api.refreshModels({ provider: targetProvider })
+          // 期间切换过供应商或发起过新更新：丢弃过期响应，绝不写入当前 UI
+          if (refreshSeqRef.current !== seq) return
           const found = res.candidates || []
           setRefreshCandidates(found)
           setRefreshInfo(res)
@@ -884,13 +896,14 @@ window.__ModuleLoader__.load({
           setRefreshPicked(picked)
           setOkMsg(res.message || ('已获取 ' + found.length + ' 个模型'))
         } catch (e) {
+          if (refreshSeqRef.current !== seq) return
           setRefreshCandidates(null)
           setRefreshPicked({})
           setRefreshInfo(null)
           setRefreshError(e && e.message ? e.message : String(e))
           setError(e && e.message ? e.message : String(e))
         } finally {
-          setRefreshBusy(false)
+          if (refreshSeqRef.current === seq) setRefreshBusy(false)
         }
       }
 
@@ -920,6 +933,7 @@ window.__ModuleLoader__.load({
 
       const confirmAddRefreshedModels = async () => {
         if (!provider) return
+        const targetProvider = provider
         const selectedModels = []
         for (const m of (refreshCandidates || [])) {
           if (!m || !m.id || !refreshPicked[m.id]) continue
@@ -929,7 +943,7 @@ window.__ModuleLoader__.load({
           if (m.name) row.name = m.name
           if (typeof m.contextWindow === 'number' && m.contextWindow > 0) row.contextWindow = m.contextWindow
           if (typeof m.maxTokens === 'number' && m.maxTokens > 0) row.maxTokens = m.maxTokens
-          if (Array.isArray(m.input) && m.input.length) row.input = m.input
+          if (Array.isArray(m.input) && m.input.indexOf('image') >= 0) row.input = ['text', 'image']
           if (m.reasoningEfforts === false || (m.reasoningEfforts && typeof m.reasoningEfforts === 'object')) {
             row.reasoningEfforts = m.reasoningEfforts
           }
@@ -941,12 +955,20 @@ window.__ModuleLoader__.load({
         }
         setRefreshBusy(true); setError(''); setOkMsg('')
         try {
-          const res = await api.addModels({ provider: provider, models: selectedModels })
+          // 固定写入发起时的供应商，避免切换后写到新供应商
+          const res = await api.addModels({ provider: targetProvider, models: selectedModels })
+          if (providerRef.current !== targetProvider) {
+            setOkMsg((res.message || ('已新增 ' + (res.addedCount || 0) + ' 个模型')) + '（已写回 ' + targetProvider + '）')
+            setRefreshCandidates(null)
+            setRefreshPicked({})
+            setRefreshInfo(null)
+            return
+          }
           setOkMsg(res.message || ('已新增 ' + (res.addedCount || 0) + ' 个模型'))
           setRefreshCandidates(null)
           setRefreshPicked({})
           setRefreshInfo(null)
-          await loadDetail(provider)
+          await loadDetail(targetProvider)
           setBoot(await api.bootstrap())
         } catch (e) {
           setError(e && e.message ? e.message : String(e))
@@ -1312,7 +1334,7 @@ window.__ModuleLoader__.load({
             React.createElement('div', { className: 'mp-field' },
               React.createElement('span', { className: 'mp-label' }, '本地供应商（仅本地编辑/应用范围）'),
               React.createElement('select', {
-                className: 'mp-select', value: provider, disabled: busy || !providers.length,
+                className: 'mp-select', value: provider, disabled: busy || refreshBusy || !providers.length,
                 onChange: (ev) => switchProvider(ev.target.value),
               }, !providers.length
                 ? React.createElement('option', { value: '' }, '无供应商')

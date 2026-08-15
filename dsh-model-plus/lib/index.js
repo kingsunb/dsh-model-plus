@@ -54,8 +54,11 @@ const LISTABLE_PROTOCOLS = ['openai-completions', 'openai-responses']
 const ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 const LEGAL_API_KEY = /^[\x21-\x7E]+$/
 const ENV_LINE_KEY = /^[A-Z][A-Z0-9_]*=[^=]/
-const DEFAULT_MODELS_URL =
-  'https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json'
+/** 一键同步/目录默认地址（旧 GitHub raw models.json 已下线，统一迁到 models.dev）。 */
+const DEFAULT_MODELS_URL = MODELS_DEV_URL
+const LEGACY_MODELS_URLS = [
+  'https://raw.githubusercontent.com/kingsunb/dsh-model-plus/main/models.json',
+]
 const FETCH_TIMEOUT_MS = 15000
 const DISCOVER_TIMEOUT_MS = 20000
 const MAX_REMOTE_BYTES = 2 * 1024 * 1024
@@ -87,6 +90,98 @@ function parseHostHeader(host, protocol) {
   } catch (_) {
     return null
   }
+}
+
+function isLoopbackHostname(hostname) {
+  const value = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '')
+  if (value === 'localhost' || value === '::1' || value === '0:0:0:0:0:0:0:1') return true
+  // IPv4-mapped IPv6 loopback
+  if (value === '::ffff:127.0.0.1') return true
+  // 整个 127.0.0.0/8
+  const parts = value.split('.')
+  if (parts.length === 4 && parts[0] === '127' && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+    return true
+  }
+  return false
+}
+
+function sameUrlOrigin(left, right) {
+  try {
+    const a = new URL(left)
+    const b = new URL(right)
+    if (a.protocol !== b.protocol) return false
+    if (a.hostname.toLowerCase() !== b.hostname.toLowerCase()) return false
+    const aPort = a.port || (a.protocol === 'https:' ? '443' : '80')
+    const bPort = b.port || (b.protocol === 'https:' ? '443' : '80')
+    return aPort === bPort
+  } catch (_) {
+    return false
+  }
+}
+
+function hasSensitiveRequestHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return false
+  return Object.keys(headers).some((key) => {
+    const lower = key.toLowerCase()
+    return lower === 'authorization' || lower === 'proxy-authorization' || lower === 'x-api-key' || lower === 'api-key'
+  })
+}
+
+function isLoopbackRemoteAddress(address) {
+  const value = String(address || '').toLowerCase()
+  if (!value) return false
+  if (value === '::1' || value === '0:0:0:0:0:0:0:1') return true
+  if (value.startsWith('::ffff:')) return isLoopbackHostname(value.slice('::ffff:'.length))
+  return isLoopbackHostname(value)
+}
+
+/** 云元数据 / 链路本地等默认禁止出站目标（防 SSRF）。 */
+function isBlockedOutboundHostname(hostname) {
+  const value = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '')
+  if (!value) return true
+  if (value === 'metadata' || value === 'metadata.google.internal') return true
+  if (value === '169.254.169.254' || value === '169.254.169.253') return true
+  // link-local 169.254.0.0/16（含云元数据）
+  const v4 = value.split('.')
+  if (v4.length === 4 && v4.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+    const a = Number(v4[0])
+    const b = Number(v4[1])
+    if (a === 169 && b === 254) return true
+    // 当前网络广播/全零
+    if (a === 0 || a === 255) return true
+  }
+  // IPv6 link-local / unique local 可不强制拦用户显式 baseURL；元数据别名已覆盖
+  if (value.startsWith('fe80:')) return true
+  return false
+}
+
+function assertOutboundUrlAllowed(rawUrl, options) {
+  const opts = options && typeof options === 'object' ? options : {}
+  let parsed
+  try { parsed = new URL(rawUrl) } catch (_) { throw new Error('请求 URL 非法') }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('仅支持 http/https')
+  if (parsed.username || parsed.password) throw new Error('请求 URL 不得包含用户名/密码')
+  const host = parsed.hostname
+  if (isBlockedOutboundHostname(host)) throw new Error('禁止访问链路本地或云元数据地址')
+  if (parsed.protocol === 'http:' && !isLoopbackHostname(host)) {
+    throw new Error('非本机目标必须使用 HTTPS；HTTP 仅允许 localhost/127.0.0.0/8/::1')
+  }
+  if (opts.requireHttps === true && parsed.protocol !== 'https:') {
+    throw new Error('该请求仅允许 HTTPS')
+  }
+  return parsed
+}
+
+function isLegacyModelsUrl(url) {
+  const value = String(url || '').trim().toLowerCase().replace(/\/+$/, '')
+  if (!value) return false
+  return LEGACY_MODELS_URLS.some((item) => item.toLowerCase().replace(/\/+$/, '') === value)
+}
+
+function migrateCatalogUrl(value) {
+  const raw = String(value || '').trim()
+  if (!raw || isLegacyModelsUrl(raw)) return MODELS_DEV_URL
+  return raw
 }
 
 /** Compare an Origin with Host using parsed host/port components, never suffix matching. */
@@ -187,7 +282,7 @@ export function apply(ctx) {
 
   function cloneModel(entry) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
-    const id = typeof entry.id === 'string' ? entry.id.trim() : ''
+    const id = typeof entry.id === 'string' ? entry.id.trim().toLowerCase() : ''
     const idPattern = isSafeIdPattern(entry.idPattern) ? entry.idPattern : ''
     if (!id && !idPattern) return null
     if (id.length > 200) return null
@@ -202,12 +297,12 @@ export function apply(ctx) {
       for (const item of entry.input) {
         if (typeof item === 'string' && INPUTS.indexOf(item) >= 0 && input.indexOf(item) < 0) input.push(item)
       }
-      if (input.length) out.input = input
+      // 文本是默认模态；只有视觉能力需要落盘 input 字段。
+      if (input.indexOf('image') >= 0) out.input = ['text', 'image']
     }
     // vision 布尔归一化：显式 input 数组优先，否则用 vision 推导
     if (!out.input) {
       if (entry.vision === true) out.input = ['text', 'image']
-      else if (entry.vision === false) out.input = ['text']
     }
     if (entry.reasoningEfforts === false) out.reasoningEfforts = false
     else if (entry.reasoningEfforts && typeof entry.reasoningEfforts === 'object' && !Array.isArray(entry.reasoningEfforts)) {
@@ -397,17 +492,42 @@ export function apply(ctx) {
     try { return JSON.parse(JSON.stringify(readPiAi())) } catch (_) { return { providers: {} } }
   }
 
+  /** 当前 llm-pi-ai namespace 的 settings revision，用于 expectedRevision CAS。 */
+  function readNsRevision() {
+    try {
+      const list = ctx.settings.describe()
+      if (Array.isArray(list)) {
+        for (const d of list) {
+          if (d && d.ns === NS && typeof d.revision === 'number' && Number.isFinite(d.revision)) return d.revision
+        }
+      }
+    } catch (_) {}
+    return undefined
+  }
+
+  function isSettingsConflictError(error) {
+    if (!error) return false
+    if (error.code === 'SETTINGS_CONFLICT') return true
+    const name = error.name ? String(error.name) : ''
+    const msg = error.message ? String(error.message) : String(error)
+    return name === 'SettingsConflictError' || /SETTINGS_CONFLICT|settings conflict|stale.*revision|revision mismatch/i.test(msg)
+  }
+
   async function writeModels(provider, models) {
     if (!ctx.settings.writable) throw new Error('settings 只读')
     refreshHostProto()
     const errors = []
     const profileNow = asObject(asObject(readPiAi().providers)[provider])
+    const expectedRevision = readNsRevision()
 
     try {
       const providerPatch = { models: models }
-      await ctx.settings.update(NS, H({ providers: { [provider]: providerPatch } }))
+      await ctx.settings.update(NS, H({ providers: { [provider]: providerPatch } }), expectedRevision)
       return 'update'
-    } catch (e) { errors.push('update:' + (e && e.message ? e.message : String(e))) }
+    } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
+      errors.push('update:' + (e && e.message ? e.message : String(e)))
+    }
 
     try {
       const user = getUserLayer() || { providers: {} }
@@ -423,9 +543,12 @@ export function apply(ctx) {
       if (prev.retryPolicy !== undefined) nextProfile.retryPolicy = prev.retryPolicy
       else if (profileNow.retryPolicy !== undefined) nextProfile.retryPolicy = profileNow.retryPolicy
       user.providers[provider] = nextProfile
-      await ctx.settings.replace(NS, H(user))
+      await ctx.settings.replace(NS, H(user), expectedRevision)
       return 'replace'
-    } catch (e) { errors.push('replace:' + (e && e.message ? e.message : String(e))) }
+    } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
+      errors.push('replace:' + (e && e.message ? e.message : String(e)))
+    }
 
     try {
       const ops = []
@@ -433,9 +556,12 @@ export function apply(ctx) {
       op1.op = 'set'
       op1.path = ['providers', String(provider), 'models']
       ops.push(op1)
-      await ctx.settings.mutate(NS, ops)
+      await ctx.settings.mutate(NS, ops, expectedRevision)
       return 'mutate'
-    } catch (e) { errors.push('mutate:' + (e && e.message ? e.message : String(e))) }
+    } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
+      errors.push('mutate:' + (e && e.message ? e.message : String(e)))
+    }
 
     throw new Error('写回失败: ' + errors.join(' | '))
   }
@@ -457,9 +583,13 @@ export function apply(ctx) {
     const url = str(value, '').trim()
     if (!url) throw new Error('自定义提供方需要填写 API 地址（baseURL）')
     if (url.length > 2048) throw new Error('baseURL 过长')
-    let parsed
-    try { parsed = new URL(url) } catch (_) { throw new Error('baseURL 不是合法 URL') }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('baseURL 仅支持 http/https')
+    try {
+      assertOutboundUrlAllowed(url)
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e)
+      if (/baseURL|合法 URL|http\/https|HTTPS|链路本地|云元数据|用户名/.test(msg)) throw new Error(msg.replace(/^请求 URL/, 'baseURL'))
+      throw new Error('baseURL 无效: ' + msg)
+    }
     return url
   }
 
@@ -483,7 +613,7 @@ export function apply(ctx) {
     const seen = Object.create(null)
     for (let i = 0; i < raw.length; i++) {
       const entry = raw[i]
-      const id = entry && typeof entry === 'object' ? str(entry.id, '').trim() : str(entry, '').trim()
+      const id = (entry && typeof entry === 'object' ? str(entry.id, '').trim() : str(entry, '').trim()).toLowerCase()
       if (!id) throw new Error('模型 ' + (i + 1) + ' 缺少 id')
       if (id.length > 200) throw new Error('模型 ' + (i + 1) + ' id 过长')
       const key = id.toLowerCase()
@@ -500,7 +630,7 @@ export function apply(ctx) {
           for (const item of entry.input) {
             if (typeof item === 'string' && INPUTS.indexOf(item) >= 0 && input.indexOf(item) < 0) input.push(item)
           }
-          if (input.length) m.input = input
+          if (input.indexOf('image') >= 0) m.input = ['text', 'image']
         }
         if (entry.reasoningEfforts === false) m.reasoningEfforts = false
         else if (entry.reasoningEfforts && typeof entry.reasoningEfforts === 'object' && !Array.isArray(entry.reasoningEfforts)) {
@@ -529,6 +659,7 @@ export function apply(ctx) {
     if (Object.prototype.hasOwnProperty.call(providersNow, route)) {
       throw new Error('已有提供方使用了这个 ID: ' + route)
     }
+    const expectedRevision = readNsRevision()
 
     try {
       const ops = [Object.assign(H({ op: 'set', path: ['providers', route], value: profile }), {
@@ -536,14 +667,20 @@ export function apply(ctx) {
         path: ['providers', String(route)],
         value: H(profile),
       })]
-      await ctx.settings.mutate(NS, ops)
+      await ctx.settings.mutate(NS, ops, expectedRevision)
       return 'mutate'
-    } catch (e) { errors.push('mutate:' + (e && e.message ? e.message : String(e))) }
+    } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
+      errors.push('mutate:' + (e && e.message ? e.message : String(e)))
+    }
 
     try {
-      await ctx.settings.update(NS, H({ providers: { [route]: profile } }))
+      await ctx.settings.update(NS, H({ providers: { [route]: profile } }), expectedRevision)
       return 'update'
-    } catch (e) { errors.push('update:' + (e && e.message ? e.message : String(e))) }
+    } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
+      errors.push('update:' + (e && e.message ? e.message : String(e)))
+    }
 
     try {
       const user = getUserLayer() || { providers: {} }
@@ -552,9 +689,12 @@ export function apply(ctx) {
         throw new Error('已有提供方使用了这个 ID: ' + route)
       }
       user.providers[route] = profile
-      await ctx.settings.replace(NS, H(user))
+      await ctx.settings.replace(NS, H(user), expectedRevision)
       return 'replace'
-    } catch (e) { errors.push('replace:' + (e && e.message ? e.message : String(e))) }
+    } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
+      errors.push('replace:' + (e && e.message ? e.message : String(e)))
+    }
 
     throw new Error('创建提供方失败: ' + errors.join(' | '))
   }
@@ -588,9 +728,10 @@ export function apply(ctx) {
     const seen = Object.create(null)
     for (let i = 0; i < data.length; i++) {
       const entry = data[i]
-      const id = labelField(entry && entry.id)
-      if (!id) continue
-      const key = id.toLowerCase()
+      const rawId = labelField(entry && entry.id)
+      if (!rawId) continue
+      const id = rawId.toLowerCase()
+      const key = id
       if (seen[key]) continue
       seen[key] = true
       const name = labelField(entry && entry.name, entry && entry.display_name)
@@ -609,7 +750,7 @@ export function apply(ctx) {
    * HTTP(S) request helper. Supports CONNECT proxy for non-loopback hosts when
    * HTTPS_PROXY/HTTP_PROXY is set. Returns { statusCode, text } (does not throw on HTTP error status).
    */
-  function httpRequestText(url, options, redirectCount) {
+  function httpRequestText(url, options, redirectCount, budgetLeft) {
     const opts = options && typeof options === 'object' ? options : {}
     const method = str(opts.method, 'GET').toUpperCase() || 'GET'
     const headersIn = opts.headers && typeof opts.headers === 'object' ? opts.headers : {}
@@ -618,16 +759,17 @@ export function apply(ctx) {
     const maxBytes = (typeof opts.maxBytes === 'number' && opts.maxBytes > 0) ? opts.maxBytes : MAX_DISCOVER_BYTES
     const rejectHttpError = opts.rejectHttpError === true
     if (typeof redirectCount !== 'number' || redirectCount < 0) redirectCount = 0
+    // 整条请求链（含重定向）的绝对总截止时间：首跳起算，递归时扣掉已耗时
+    const budget = (typeof budgetLeft === 'number' && budgetLeft > 0) ? budgetLeft : timeoutMs
+    const hopStart = Date.now()
 
     return new Promise((resolve, reject) => {
       Promise.all([import('node:https'), import('node:http'), import('node:url')]).then(([httpsMod, httpMod, urlMod]) => {
         let parsed
-        try { parsed = new URL(url) } catch (_) {
-          reject(new Error('请求 URL 非法'))
-          return
-        }
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-          reject(new Error('仅支持 http/https'))
+        try {
+          parsed = assertOutboundUrlAllowed(url)
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error(String(e)))
           return
         }
         const isHttps = parsed.protocol === 'https:'
@@ -635,10 +777,13 @@ export function apply(ctx) {
         const targetHost = parsed.hostname
         const targetPort = parsed.port || (isHttps ? 443 : 80)
         const targetPath = parsed.pathname + (parsed.search || '')
-        const isLoopback = targetHost === 'localhost' || targetHost === '127.0.0.1' || targetHost === '::1'
+        const isLoopback = isLoopbackHostname(targetHost)
         const proxyUrl = isLoopback
           ? ''
           : (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '')
+
+        // 绝对截止：不论是否空闲，到点即销毁（覆盖慢滴流/挂起场景）
+        const deadlineSignal = AbortSignal.timeout(budget)
 
         const finishResponse = (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -651,12 +796,33 @@ export function apply(ctx) {
               reject(new Error('非 GET 请求遇到重定向（HTTP ' + res.statusCode + '），已中止'))
               return
             }
+            const spent = Date.now() - hopStart
+            const nextBudget = budget - spent
+            if (nextBudget <= 50) {
+              reject(new Error('请求超过总截止时间（' + timeoutMs + 'ms）'))
+              return
+            }
             let nextUrl
             try { nextUrl = new URL(res.headers.location, url).href } catch (_) {
               reject(new Error('重定向目标非法'))
               return
             }
-            httpRequestText(nextUrl, opts, redirectCount + 1).then(resolve, reject)
+            try {
+              const nextParsed = assertOutboundUrlAllowed(nextUrl)
+              if (parsed.protocol === 'https:' && nextParsed.protocol !== 'https:') {
+                reject(new Error('HTTPS 请求禁止降级到 HTTP 重定向'))
+                return
+              }
+              // 跨源重定向一律拒绝携带敏感头，防止 API Key 被 302 拐走
+              if (hasSensitiveRequestHeaders(headersIn) && !sameUrlOrigin(url, nextUrl)) {
+                reject(new Error('携带凭据的请求禁止跨域重定向'))
+                return
+              }
+            } catch (e) {
+              reject(e instanceof Error ? e : new Error('重定向目标非法'))
+              return
+            }
+            httpRequestText(nextUrl, opts, redirectCount + 1, nextBudget).then(resolve, reject)
             return
           }
 
@@ -706,9 +872,18 @@ export function apply(ctx) {
         }
 
         const doRequest = (reqOpts) => {
-          const req = lib.request(reqOpts, finishResponse)
-          req.on('error', reject)
+          const req = lib.request(Object.assign({}, reqOpts, { signal: deadlineSignal }), finishResponse)
+          req.on('error', (error) => {
+            if (error && (error.name === 'AbortError' || error.name === 'TimeoutError' || error.code === 'ABORT_ERR')) {
+              reject(new Error('请求超过总截止时间（' + timeoutMs + 'ms）'))
+              return
+            }
+            reject(error)
+          })
           req.on('timeout', () => { req.destroy(); reject(new Error('请求超时（' + timeoutMs + 'ms）')) })
+          deadlineSignal.addEventListener('abort', () => {
+            req.destroy(new Error('请求超过总截止时间（' + timeoutMs + 'ms）'))
+          })
           if (body) req.write(body)
           req.end()
           return req
@@ -729,16 +904,25 @@ export function apply(ctx) {
         }
 
         const proxy = urlMod.parse(proxyUrl)
-        const tunnelReq = httpMod.request({
+        const tunnelReq = httpMod.request(Object.assign({
           hostname: proxy.hostname,
           port: proxy.port || 8080,
           method: 'CONNECT',
           path: targetHost + ':' + targetPort,
           timeout: timeoutMs,
           headers: { host: targetHost + ':' + targetPort },
+        }, { signal: deadlineSignal }))
+        tunnelReq.on('error', (error) => {
+          if (error && (error.name === 'AbortError' || error.name === 'TimeoutError' || error.code === 'ABORT_ERR')) {
+            reject(new Error('请求超过总截止时间（' + timeoutMs + 'ms）'))
+            return
+          }
+          reject(error)
         })
-        tunnelReq.on('error', reject)
         tunnelReq.on('timeout', () => { tunnelReq.destroy(); reject(new Error('代理连接超时（' + timeoutMs + 'ms）')) })
+        deadlineSignal.addEventListener('abort', () => {
+          tunnelReq.destroy(new Error('请求超过总截止时间（' + timeoutMs + 'ms）'))
+        })
         tunnelReq.on('connect', (proxyRes, socket) => {
           if (proxyRes.statusCode !== 200) {
             reject(new Error('代理 CONNECT 失败: HTTP ' + proxyRes.statusCode))
@@ -1369,14 +1553,32 @@ export function apply(ctx) {
   }
 
   function resolveCatalogUrl(value) {
-    const raw = str(value, '').trim()
+    const raw = migrateCatalogUrl(str(value, '').trim())
     if (!raw) return MODELS_DEV_URL
     return validateModelsUrl(raw)
   }
 
   function readCatalogUrl() {
     const plus = readPlus()
-    return resolveCatalogUrl(str(plus.modelsDevUrl, '') || str(plus.modelsUrl, '') || str(plus.indexUrl, '') || MODELS_DEV_URL)
+    const stored = str(plus.modelsDevUrl, '') || str(plus.modelsUrl, '') || str(plus.indexUrl, '')
+    // 旧 GitHub raw models.json 已 404：读到即视为默认 models.dev
+    return resolveCatalogUrl(stored || MODELS_DEV_URL)
+  }
+
+  /** 启动/读写偏好时把旧同步地址就地迁到 models.dev（best-effort，不阻塞请求）。 */
+  function maybeMigrateLegacyCatalogPrefs() {
+    try {
+      const plus = readPlus()
+      const current = str(plus.modelsDevUrl, '') || str(plus.modelsUrl, '') || str(plus.indexUrl, '')
+      if (!isLegacyModelsUrl(current)) return
+      // fire-and-forget；失败不影响本次读路径
+      savePlusPrefs({
+        modelsDevUrl: MODELS_DEV_URL,
+        modelsUrl: MODELS_DEV_URL,
+        indexUrl: MODELS_DEV_URL,
+        migratedFromLegacyModelsUrl: true,
+      }).catch(() => {})
+    } catch (_) {}
   }
 
   // cacheKey = catalog URL；切换自定义地址时不复用旧缓存
@@ -1468,7 +1670,7 @@ export function apply(ctx) {
       text = await httpGetText(url, headers, DISCOVER_TIMEOUT_MS, MAX_DISCOVER_BYTES, 0)
     } catch (e) {
       const msg = e && e.message ? e.message : String(e)
-      if (/请求超时|端点返回|API Key|字节限制|重定向|代理/.test(msg)) throw e
+      if (/请求超时|总截止时间|端点返回|API Key|字节限制|重定向|代理/.test(msg)) throw e
       throw new Error('无法访问模型列表: ' + msg)
     }
     let body
@@ -1765,6 +1967,7 @@ export function apply(ctx) {
     const norm = normalizeRetryPolicyInput(args || {})
     refreshHostProto()
     const errors = []
+    const expectedRevision = readNsRevision()
 
     if (norm.clear) {
       try {
@@ -1772,7 +1975,7 @@ export function apply(ctx) {
           op: 'unset',
           path: ['providers', String(provider), 'retryPolicy'],
         })
-        await ctx.settings.mutate(NS, [op])
+        await ctx.settings.mutate(NS, [op], expectedRevision)
         return {
           ok: true,
           provider: provider,
@@ -1784,6 +1987,7 @@ export function apply(ctx) {
           providers: listProviders(),
         }
       } catch (e) {
+        if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
         errors.push('mutate-unset:' + (e && e.message ? e.message : String(e)))
       }
       try {
@@ -1793,7 +1997,7 @@ export function apply(ctx) {
         const next = Object.assign({}, prev)
         delete next.retryPolicy
         user.providers[provider] = next
-        await ctx.settings.replace(NS, H(user))
+        await ctx.settings.replace(NS, H(user), expectedRevision)
         return {
           ok: true,
           provider: provider,
@@ -1805,6 +2009,7 @@ export function apply(ctx) {
           providers: listProviders(),
         }
       } catch (e) {
+        if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
         errors.push('replace-unset:' + (e && e.message ? e.message : String(e)))
       }
       throw new Error('清除 retryPolicy 失败: ' + errors.join(' | '))
@@ -1817,7 +2022,7 @@ export function apply(ctx) {
         path: ['providers', String(provider), 'retryPolicy'],
         value: H(value),
       })
-      await ctx.settings.mutate(NS, [op])
+      await ctx.settings.mutate(NS, [op], expectedRevision)
       const view = readRetryPolicyView({ retryPolicy: value })
       return {
         ok: true,
@@ -1831,11 +2036,12 @@ export function apply(ctx) {
         providers: listProviders(),
       }
     } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
       errors.push('mutate:' + (e && e.message ? e.message : String(e)))
     }
 
     try {
-      await ctx.settings.update(NS, H({ providers: { [provider]: { retryPolicy: value } } }))
+      await ctx.settings.update(NS, H({ providers: { [provider]: { retryPolicy: value } } }), expectedRevision)
       const view = readRetryPolicyView({ retryPolicy: value })
       return {
         ok: true,
@@ -1849,6 +2055,7 @@ export function apply(ctx) {
         providers: listProviders(),
       }
     } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
       errors.push('update:' + (e && e.message ? e.message : String(e)))
     }
 
@@ -1857,7 +2064,7 @@ export function apply(ctx) {
       if (!user.providers || typeof user.providers !== 'object') user.providers = {}
       const prev = user.providers[provider] && typeof user.providers[provider] === 'object' ? user.providers[provider] : Object.assign({}, profile)
       user.providers[provider] = Object.assign({}, prev, { retryPolicy: value })
-      await ctx.settings.replace(NS, H(user))
+      await ctx.settings.replace(NS, H(user), expectedRevision)
       const view = readRetryPolicyView({ retryPolicy: value })
       return {
         ok: true,
@@ -1871,6 +2078,7 @@ export function apply(ctx) {
         providers: listProviders(),
       }
     } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
       errors.push('replace:' + (e && e.message ? e.message : String(e)))
     }
 
@@ -1945,6 +2153,7 @@ export function apply(ctx) {
     refreshHostProto()
     const errors = []
     let via = ''
+    const expectedRevision = readNsRevision()
 
     try {
       const op = Object.assign(H({ op: 'set', path: ['providers', provider], value: next }), {
@@ -1952,14 +2161,16 @@ export function apply(ctx) {
         path: ['providers', String(provider)],
         value: H(next),
       })
-      await ctx.settings.mutate(NS, [op])
+      await ctx.settings.mutate(NS, [op], expectedRevision)
       via = 'mutate'
     } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
       errors.push('mutate:' + (e && e.message ? e.message : String(e)))
       try {
-        await ctx.settings.update(NS, H({ providers: { [provider]: next } }))
+        await ctx.settings.update(NS, H({ providers: { [provider]: next } }), expectedRevision)
         via = 'update'
       } catch (e2) {
+        if (isSettingsConflictError(e2)) throw new Error('配置已被其他操作更新，请刷新后重试')
         errors.push('update:' + (e2 && e2.message ? e2.message : String(e2)))
         try {
           const user = getUserLayer() || { providers: {} }
@@ -1968,9 +2179,10 @@ export function apply(ctx) {
             ? user.providers[provider]
             : {}
           user.providers[provider] = Object.assign({}, prev, next)
-          await ctx.settings.replace(NS, H(user))
+          await ctx.settings.replace(NS, H(user), expectedRevision)
           via = 'replace'
         } catch (e3) {
+          if (isSettingsConflictError(e3)) throw new Error('配置已被其他操作更新，请刷新后重试')
           errors.push('replace:' + (e3 && e3.message ? e3.message : String(e3)))
           throw new Error('保存供应商失败: ' + errors.join(' | '))
         }
@@ -2081,40 +2293,76 @@ export function apply(ctx) {
   async function savePlusPrefs(prefs) {
     refreshHostProto()
     const next = Object.assign({}, readPlus(), prefs || {})
-    try { await ctx.settings.update(NS, H({ __modelPlus: next })); return } catch (_) {}
+    const expectedRevision = readNsRevision()
+    try {
+      await ctx.settings.update(NS, H({ __modelPlus: next }), expectedRevision)
+      return
+    } catch (e) {
+      if (isSettingsConflictError(e)) throw new Error('配置已被其他操作更新，请刷新后重试')
+    }
     const user = getUserLayer() || {}
     user.__modelPlus = next
-    await ctx.settings.replace(NS, H(user))
+    await ctx.settings.replace(NS, H(user), expectedRevision)
   }
 
   function validateModelsUrl(value) {
-    const url = str(value, '').trim()
+    const url = migrateCatalogUrl(str(value, '').trim())
     if (!url || url.length > 2048 || !/^https:\/\/[^\s]+$/i.test(url)) throw new Error('models.json 地址必须是 HTTPS URL（最长 2048 字符）')
+    // 统一走出站策略（禁云元数据等）；目录拉取强制 HTTPS
+    assertOutboundUrlAllowed(url, { requireHttps: true })
     return url
   }
 
-  function httpsGetText(url, timeoutMs, redirectCount) {
+  function httpsGetText(url, timeoutMs, redirectCount, budgetLeft) {
     if (typeof redirectCount !== 'number' || redirectCount < 0) redirectCount = 0
+    const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : FETCH_TIMEOUT_MS
+    // 整条请求链（含重定向）的绝对总截止时间：首跳起算，递归时扣掉已耗时
+    const budget = (typeof budgetLeft === 'number' && budgetLeft > 0) ? budgetLeft : timeout
+    const hopStart = Date.now()
     return new Promise((resolve, reject) => {
       Promise.all([import('node:https'), import('node:http'), import('node:url')]).then(([https, http, urlMod]) => {
-        const parsed = urlMod.parse(url)
-        const targetHost = parsed.hostname
-        const targetPort = parsed.port || 443
-        const targetPath = parsed.path
-        // 检测代理：HTTPS_PROXY / HTTP_PROXY 环境变量
-        const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || ''
+        let safe
+        try {
+          safe = assertOutboundUrlAllowed(url, { requireHttps: true })
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error(String(e)))
+          return
+        }
+        const targetHost = safe.hostname
+        const targetPort = safe.port || 443
+        const targetPath = safe.pathname + (safe.search || '')
+        // 检测代理：HTTPS_PROXY / HTTP_PROXY 环境变量；loopback 不走代理
+        const proxyUrl = isLoopbackHostname(targetHost)
+          ? ''
+          : (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '')
+        const deadlineSignal = AbortSignal.timeout(budget)
         const doRequest = (opts) => {
-          const req = https.request(opts, (res) => {
+          const req = https.request(Object.assign({}, opts, { signal: deadlineSignal }), (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-              // 跟随重定向：限制次数，并对目标重新做 HTTPS 校验，防止被 302 导向内网/非 HTTPS
+              // 跟随重定向：限制次数，并对目标重新做 HTTPS/出站校验，防止被 302 导向内网/非 HTTPS
               res.resume()
               if (redirectCount >= MAX_REDIRECTS) {
                 reject(new Error('重定向次数超限（' + MAX_REDIRECTS + '）'))
                 return
               }
-              const redirectUrl = urlMod.resolve(url, res.headers.location)
-              try { validateModelsUrl(redirectUrl) } catch (e) { reject(e); return }
-              httpsGetText(redirectUrl, timeoutMs, redirectCount + 1).then(resolve, reject)
+              const spent = Date.now() - hopStart
+              const nextBudget = budget - spent
+              if (nextBudget <= 50) {
+                reject(new Error('远程目录请求超过总截止时间（' + timeout + 'ms）'))
+                return
+              }
+              let redirectUrl
+              try { redirectUrl = new URL(res.headers.location, url).href } catch (_) {
+                reject(new Error('重定向目标非法'))
+                return
+              }
+              try {
+                assertOutboundUrlAllowed(redirectUrl, { requireHttps: true })
+              } catch (e) {
+                reject(e instanceof Error ? e : new Error(String(e)))
+                return
+              }
+              httpsGetText(redirectUrl, timeout, redirectCount + 1, nextBudget).then(resolve, reject)
               return
             }
             if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -2122,42 +2370,75 @@ export function apply(ctx) {
               reject(new Error('HTTP ' + res.statusCode + ' for ' + url))
               return
             }
+            const declared = Number(res.headers['content-length'])
+            if (Number.isFinite(declared) && declared > MAX_REMOTE_BYTES) {
+              res.resume()
+              reject(new Error('远程目录超过 2 MiB 限制'))
+              return
+            }
             const chunks = []
-            res.on('data', (c) => chunks.push(c))
-            res.on('end', () => {
-              const text = Buffer.concat(chunks).toString('utf8')
-              if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) {
+            let total = 0
+            let aborted = false
+            res.on('data', (c) => {
+              if (aborted) return
+              total += c.length
+              if (total > MAX_REMOTE_BYTES) {
+                aborted = true
+                res.destroy()
                 reject(new Error('远程目录超过 2 MiB 限制'))
                 return
               }
+              chunks.push(c)
+            })
+            res.on('end', () => {
+              if (aborted) return
+              const text = Buffer.concat(chunks).toString('utf8')
               resolve(text)
             })
-            res.on('error', reject)
+            res.on('error', (error) => { if (!aborted) reject(error) })
           })
-          req.on('error', reject)
-          req.on('timeout', () => { req.destroy(); reject(new Error('远程目录请求超时（' + timeoutMs + 'ms）')) })
+          req.on('error', (error) => {
+            if (error && (error.name === 'AbortError' || error.name === 'TimeoutError' || error.code === 'ABORT_ERR')) {
+              reject(new Error('远程目录请求超过总截止时间（' + timeout + 'ms）'))
+              return
+            }
+            reject(error)
+          })
+          req.on('timeout', () => { req.destroy(new Error('远程目录请求超时（' + timeout + 'ms）')) })
+          deadlineSignal.addEventListener('abort', () => {
+            req.destroy(new Error('远程目录请求超过总截止时间（' + timeout + 'ms）'))
+          })
           req.end()
           return req
         }
         const directOpts = {
           hostname: targetHost, port: targetPort, path: targetPath, method: 'GET',
           headers: { 'user-agent': 'dsh-model-plus', 'accept': 'application/json,text/plain,*/*' },
-          timeout: timeoutMs,
+          timeout: timeout,
         }
         if (!proxyUrl) {
           // 直连
           doRequest(directOpts)
           return
         }
-        // 走 HTTP CONNECT 隧道代理
+        // 走 HTTP CONNECT 隧道代理（CONNECT 阶段同样受绝对截止约束）
         const proxy = urlMod.parse(proxyUrl)
-        const tunnelReq = http.request({
+        const tunnelReq = http.request(Object.assign({
           hostname: proxy.hostname, port: proxy.port || 8080, method: 'CONNECT',
-          path: targetHost + ':' + targetPort, timeout: timeoutMs,
+          path: targetHost + ':' + targetPort,
           headers: { host: targetHost + ':' + targetPort },
+        }, { signal: deadlineSignal }))
+        tunnelReq.on('error', (error) => {
+          if (error && (error.name === 'AbortError' || error.name === 'TimeoutError' || error.code === 'ABORT_ERR')) {
+            reject(new Error('远程目录请求超过总截止时间（' + timeout + 'ms）'))
+            return
+          }
+          reject(error)
         })
-        tunnelReq.on('error', reject)
-        tunnelReq.on('timeout', () => { tunnelReq.destroy(); reject(new Error('代理连接超时（' + timeoutMs + 'ms）')) })
+        tunnelReq.on('timeout', () => { tunnelReq.destroy(new Error('代理连接超时（' + timeout + 'ms）')) })
+        deadlineSignal.addEventListener('abort', () => {
+          tunnelReq.destroy(new Error('远程目录请求超过总截止时间（' + timeout + 'ms）'))
+        })
         tunnelReq.on('connect', (proxyRes, socket) => {
           if (proxyRes.statusCode !== 200) {
             reject(new Error('代理 CONNECT 失败: HTTP ' + proxyRes.statusCode))
@@ -2170,58 +2451,14 @@ export function apply(ctx) {
     })
   }
 
-  async function fetchText(url) {
-    const safeUrl = validateModelsUrl(url)
-    // 优先用 ctx.web（如果有 fetch provider 注册且可用）；否则回退到 Node https 模块
-    const web = ctx.get('web')
-    if (web && typeof web.fetch === 'function') {
-      try {
-        const result = await Promise.race([
-          web.fetch({ url: safeUrl }).then((value) => ({ kind: 'result', value: value })),
-          ctx.timer.timeout(FETCH_TIMEOUT_MS).then(() => ({ kind: 'timeout' })),
-        ])
-        if (result.kind === 'timeout') throw new Error('远程目录请求超时（' + FETCH_TIMEOUT_MS + 'ms）')
-        const response = result.value
-        if (!response || response.statusCode < 200 || response.statusCode >= 300) throw new Error('HTTP ' + (response && response.statusCode) + ' for ' + safeUrl)
-        const body = response.body
-        let text = ''
-        if (typeof body === 'string') text = body
-        else if (body && (body.type === 'text' || body.type === 'html')) text = String(body.content || body.text || '')
-        else if (body && typeof body.content === 'string') text = body.content
-        else if (body && typeof body.text === 'string') text = body.text
-        else throw new Error('unsupported body from web.fetch')
-        if (new TextEncoder().encode(text).length > MAX_REMOTE_BYTES) throw new Error('远程目录超过 2 MiB 限制')
-        return text
-      } catch (e) {
-        // web provider 不可用时回退到 https 模块；其它错误继续抛出
-        const msg = e && (e.code || e.message) ? String(e.code || e.message) : String(e)
-        if (!/WEB_PROVIDER_UNAVAILABLE|no usable web provider|not registered|configured web provider/i.test(msg)) throw e
-        // 落到下方 https 模块回退
-      }
-    }
-    // 回退：Node.js 内置 https 模块（直连，不依赖 fetch 环境）
-    return httpsGetText(safeUrl, FETCH_TIMEOUT_MS)
-  }
-
-  async function fetchJson(url) {
-    const text = await fetchText(url)
-    try { return JSON.parse(text) } catch (e) { throw new Error('JSON 解析失败: ' + url + ' / ' + (e && e.message ? e.message : e)) }
-  }
-
-  function matchRemoteModel(remoteModels, localId) {
-    const id = String(localId || '')
-    const idLower = id.toLowerCase()
-    for (const m of (remoteModels || [])) {
-      if (!m) continue
-      if (typeof m.id === 'string' && m.id.toLowerCase() === idLower) return m
-      if (typeof m.idPattern === 'string' && matchIdPattern(m.idPattern, id)) return m
-    }
-    return null
-  }
-
   function setInput(model, input) {
     const next = Object.assign({}, model)
-    if (Array.isArray(input) && input.length) next.input = input.slice()
+    if (Array.isArray(input) && input.indexOf('image') >= 0) {
+      next.input = ['text', 'image']
+    } else {
+      // 无视觉不落盘 input
+      delete next.input
+    }
     return next
   }
 
@@ -2273,55 +2510,6 @@ export function apply(ctx) {
     return { model: next, changed: changed, notes: notes.join(',') }
   }
 
-  async function loadRemoteModels(modelsUrl) {
-    const safeUrl = validateModelsUrl(modelsUrl)
-    const data = await fetchJson(safeUrl)
-    if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.models)) {
-      throw new Error('远程 JSON 必须是包含 models 数组的目录: ' + safeUrl)
-    }
-    const models = []
-    const seen = {}
-    for (const raw of data.models) {
-      const model = cloneModel(raw)
-      if (!model || model.id.length > 200 || seen[model.id]) continue
-      seen[model.id] = true
-      models.push(model)
-    }
-    if (!models.length) throw new Error('远程目录没有有效模型条目')
-    return { catalog: data, models: models, modelsUrl: safeUrl }
-  }
-
-  async function syncFromRemote(args) {
-    const provider = str(args && args.provider, '')
-    if (!provider) throw new Error('缺少 provider')
-    const modelsUrl = str(args && args.modelsUrl, '') || str(args && args.indexUrl, '') || str(readPlus().modelsUrl, '') || str(readPlus().indexUrl, '') || DEFAULT_MODELS_URL
-    const overwrite = !!(args && args.overwriteEfforts === true)
-    const syncInput = args && args.syncVision === false ? false : true
-    const profile = asObject(asObject(readPiAi().providers)[provider])
-    if (!Object.keys(profile).length) throw new Error('供应商未配置: ' + provider)
-
-    const remote = await loadRemoteModels(modelsUrl)
-    const existing = getRawModels(provider)
-    const changes = []
-    const nextModels = []
-    for (const m of existing) {
-      const hit = matchRemoteModel(remote.models, m.id)
-      if (!hit) { nextModels.push(m); continue }
-      const applied = applyRemoteToLocal(m, hit, overwrite, syncInput)
-      nextModels.push(applied.model)
-      if (applied.changed) changes.push({
-        id: m.id, notes: applied.notes, summary: effortSummary(applied.model), vision: hasVision(applied.model),
-        contextWindow: typeof applied.model.contextWindow === 'number' ? applied.model.contextWindow : 0,
-        matchedBy: hit.id ? ('id:' + hit.id) : ('pattern:' + (hit.idPattern || '')),
-      })
-    }
-    return {
-      modelsUrl: remote.modelsUrl, indexName: str(remote.catalog.name, 'dsh-model-plus'), updatedAt: str(remote.catalog.updatedAt, ''),
-      remoteRules: remote.models.length, localCount: existing.length, changeCount: changes.length, changes: changes,
-      nextModels: nextModels, overwriteEfforts: overwrite, syncVision: syncInput,
-    }
-  }
-
   async function saveFromEditor(provider, modelId, editor, messagePrefix) {
     const models = getRawModels(provider)
     const idx = models.findIndex((m) => m.id === modelId)
@@ -2329,7 +2517,9 @@ export function apply(ctx) {
     const norm = normalizeEditor(editor)
     let next = Object.assign({}, models[idx])
     next.reasoningEfforts = norm.reasoningEfforts
-    next.input = norm.vision === true ? ['text', 'image'] : ['text']
+    // 无视觉不写 input；有视觉只落 ['text','image']（文本是默认模态）
+    if (norm.vision === true) next.input = ['text', 'image']
+    else delete next.input
     if (norm.clearContextWindow) delete next.contextWindow
     else if (norm.contextWindow !== undefined) next.contextWindow = norm.contextWindow
     if (norm.clearMaxTokens) delete next.maxTokens
@@ -2343,8 +2533,10 @@ export function apply(ctx) {
 
   async function bootstrap() {
     refreshHostProto()
+    maybeMigrateLegacyCatalogPrefs()
     const plus = readPlus()
     const credentials = ctx.get('credentials')
+    const catalogUrl = readCatalogUrl()
     return {
       writable: !!ctx.settings.writable,
       version: VERSION,
@@ -2356,11 +2548,11 @@ export function apply(ctx) {
       canStoreApiKey: !!(credentials && typeof credentials.set === 'function'),
       defaultTestPrompt: DEFAULT_TEST_PROMPT,
       defaultTestMaxTokens: DEFAULT_TEST_MAX_TOKENS,
-      modelsDevUrl: readCatalogUrl(),
+      modelsDevUrl: catalogUrl,
       defaultModelsDevUrl: MODELS_DEV_URL,
       // 兼容旧字段名
       defaultModelsUrl: MODELS_DEV_URL,
-      modelsUrl: readCatalogUrl(),
+      modelsUrl: catalogUrl,
       defaultProviderMaxRetries: DEFAULT_PROVIDER_MAX_RETRIES,
       note: '一键同步默认从目录（models.dev 或自定义地址）按模型 id 补全思考强度/上下文/视觉；本地可按供应商编辑，也可添加三方供应商。新建供应商默认 retryPolicy.maxRetries=' + DEFAULT_PROVIDER_MAX_RETRIES + '。',
       repo: 'https://github.com/kingsunb/dsh-model-plus',
@@ -2406,42 +2598,6 @@ export function apply(ctx) {
       editor.levels = LEVELS.map((level) => ({ level: level, enabled: false, wire: level === 'off' ? '' : level, wireNull: level === 'off' }))
     }
     return saveFromEditor(provider, modelId, editor, '已应用预设「' + preset.label + '」到 ')
-  }
-
-  async function saveSyncUrl(args) {
-    const modelsUrl = str(args && args.modelsUrl, '') || str(args && args.indexUrl, DEFAULT_MODELS_URL) || DEFAULT_MODELS_URL
-    validateModelsUrl(modelsUrl) // 提前校验，避免坏地址落盘后延迟到同步才报错
-    await savePlusPrefs({ modelsUrl: modelsUrl, indexUrl: modelsUrl })
-    return { ok: true, modelsUrl: modelsUrl, indexUrl: modelsUrl, message: '已保存同步地址' }
-  }
-
-  async function syncPreview(args) {
-    const plan = await syncFromRemote(args || {})
-    return {
-      modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, indexName: plan.indexName, updatedAt: plan.updatedAt,
-      remoteRules: plan.remoteRules, localCount: plan.localCount, changeCount: plan.changeCount, changes: plan.changes,
-      overwriteEfforts: plan.overwriteEfforts, syncVision: plan.syncVision,
-    }
-  }
-
-  async function syncApply(args) {
-    const provider = str(args && args.provider, '')
-    const plan = await syncFromRemote(args || {})
-    if (!plan.changeCount) {
-      return {
-        ok: true, skipped: true, changeCount: 0,
-        message: '远程 models.json 无匹配变更（或本地已是最新）。只按模型名匹配。',
-        modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, changes: [], localCount: plan.localCount,
-      }
-    }
-    const via = await writeModels(provider, plan.nextModels)
-    await savePlusPrefs({ modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, lastSyncAt: Date.now() })
-    return {
-      ok: true, skipped: false, changeCount: plan.changeCount,
-      message: '已按模型名从 models.json 写回 ' + plan.changeCount + ' 项（via ' + via + '）。',
-      modelsUrl: plan.modelsUrl, indexUrl: plan.modelsUrl, changes: plan.changes, localCount: plan.localCount,
-      models: plan.nextModels.map(modelView),
-    }
   }
 
   async function checkUpdate() {
@@ -2531,19 +2687,46 @@ export function apply(ctx) {
     }
   }
 
+  /**
+   * 写接口信任栅栏：
+   * 1) 有 Origin 时必须与 Host 同源（防 CSRF）
+   * 2) 无 Origin 时仅允许 loopback 远端（本机进程）；经反代/暴露后的远程 curl 直接 403
+   * 注意：这不是完整会话认证，但堵住了「无 Origin = 放行」的暴露面。
+   */
+  function assertTrustedWriteRequest(req) {
+    const host = req && req.headers ? req.headers.host : ''
+    const origin = req && req.headers ? req.headers.origin : undefined
+    if (origin) {
+      if (!host || !sameOriginHost(origin, host)) {
+        const err = new Error('cross-origin denied')
+        err.statusCode = 403
+        throw err
+      }
+      return
+    }
+    const remote = (req && (req.socket && (req.socket.remoteAddress || req.socket.remoteFamily)))
+      || (req && req.connection && req.connection.remoteAddress)
+      || ''
+    // Node 在 trust proxy 场景下 remoteAddress 可能是代理；无 Origin 一律要求直连 loopback
+    if (!isLoopbackRemoteAddress(remote)) {
+      const err = new Error('unauthenticated write denied')
+      err.statusCode = 403
+      throw err
+    }
+  }
+
   /** POST JSON route (body parsed and passed to run). */
   function postRoute(path, run) {
     return {
       kind: 'exact', path,
       handler: (req, res) => {
         if (req.method !== 'POST') { json(res, 405, { ok: false, error: 'method-not-allowed' }); return }
-        // CSRF defense: reject cross-origin browser requests (curl/no-Origin is allowed)
-        const origin = req.headers.origin
-        if (origin) {
-          const host = req.headers.host
-          if (host && !sameOriginHost(origin, host)) {
-            json(res, 403, { ok: false, error: 'cross-origin denied' }); return
-          }
+        try {
+          assertTrustedWriteRequest(req)
+        } catch (error) {
+          const status = (error && error.statusCode) || 403
+          json(res, status, { ok: false, error: routeError(error) })
+          return
         }
         readJsonBody(req).then(
           (body) => {
@@ -2578,9 +2761,6 @@ export function apply(ctx) {
       postRoute(`${API_PREFIX}/save-catalog-url`, (b) => saveCatalogUrl(b)),
       postRoute(`${API_PREFIX}/save-provider-retry`, (b) => saveProviderRetry(b)),
       postRoute(`${API_PREFIX}/test-model`, (b) => testModel(b)),
-      postRoute(`${API_PREFIX}/save-sync-url`, (b) => saveSyncUrl(b)),
-      postRoute(`${API_PREFIX}/sync-preview`, (b) => syncPreview(b)),
-      postRoute(`${API_PREFIX}/sync-apply`, (b) => syncApply(b)),
       getRoute(`${API_PREFIX}/check-update`, () => checkUpdate()),
     ]
   }
