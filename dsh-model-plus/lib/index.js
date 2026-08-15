@@ -31,7 +31,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.34'
+const VERSION = '0.1.35'
 /** 新建供应商默认重试次数（写入 retryPolicy.maxRetries）。平台默认也是 2。 */
 const DEFAULT_PROVIDER_MAX_RETRIES = 2
 const MAX_PROVIDER_MAX_RETRIES = 50
