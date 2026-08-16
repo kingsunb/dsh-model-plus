@@ -1,6 +1,6 @@
 {
   "name": "@kingsunb/dsh-model-plus",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "description": "DSH Web 插件：本地按供应商编辑模型思考强度/视觉/上下文；一键同步默认从 models.dev 补全。",
   "type": "module",
   "main": "lib/index.js",
@@ -34,9 +34,13 @@
     "lib/**/*.js.map",
     "cordis.patch.yml",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/kingsunb/dsh-model-plus.git"

@@ -35,10 +35,10 @@ window.__ModuleLoader__.load({
             body: JSON.stringify(body),
           });
       if (!response.ok) {
-        let msg = 'plus ' + path + ' failed: ' + response.status;
+        let msg = 'plus ' + path + ' failed: HTTP ' + response.status;
         try {
           const data = await response.json();
-          if (data && data.error) msg = data.error;
+          if (data && data.error) msg = data.error + '（HTTP ' + response.status + ' · ' + path + '）';
         } catch (_) {}
         throw new Error(msg);
       }

@@ -31,10 +31,11 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.35'
+const VERSION = '0.1.36'
 /** 新建供应商默认重试次数（写入 retryPolicy.maxRetries）。平台默认也是 2。 */
 const DEFAULT_PROVIDER_MAX_RETRIES = 2
-const MAX_PROVIDER_MAX_RETRIES = 50
+/** maxRetries 允许的最大值（几乎不设限，防御性上限）。 */
+const MAX_PROVIDER_MAX_RETRIES = 99999
 /** 模型测试超时：10 分钟（推理 + 长 SVG 输出可能很慢）。 */
 const TEST_TIMEOUT_MS = 10 * 60 * 1000
 const MAX_TEST_BYTES = 1024 * 1024
@@ -125,6 +126,18 @@ function hasSensitiveRequestHeaders(headers) {
     const lower = key.toLowerCase()
     return lower === 'authorization' || lower === 'proxy-authorization' || lower === 'x-api-key' || lower === 'api-key'
   })
+}
+
+/** Create an absolute-deadline AbortSignal on supported Node versions. */
+function createDeadlineSignal(ms) {
+  const timeout = Number.isFinite(ms) && ms > 0 ? Math.ceil(ms) : 1
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(timeout)
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+  if (timer && typeof timer.unref === 'function') timer.unref()
+  return controller.signal
 }
 
 function isLoopbackRemoteAddress(address) {
@@ -783,7 +796,7 @@ export function apply(ctx) {
           : (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '')
 
         // 绝对截止：不论是否空闲，到点即销毁（覆盖慢滴流/挂起场景）
-        const deadlineSignal = AbortSignal.timeout(budget)
+        const deadlineSignal = createDeadlineSignal(budget)
 
         const finishResponse = (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -976,6 +989,13 @@ export function apply(ctx) {
     const n = typeof max === 'number' && max > 0 ? max : 2000
     if (s.length <= n) return s
     return s.slice(0, n) + '…'
+  }
+
+  /** Keep diagnostic upstream text useful without echoing credentials or secrets. */
+  function sanitizeDiagnosticText(value, max) {
+    return clipText(value, max)
+      .replace(/(authorization|proxy-authorization|x-api-key|api-key|token|bearer)\s*([:=]\s*|\s+)[^\s,;"']+/gi, '$1: [redacted]')
+      .replace(/\bsk-[A-Za-z0-9._-]{6,}\b/g, '[redacted-key]')
   }
 
   function joinNonEmptyTexts(parts) {
@@ -1220,7 +1240,7 @@ export function apply(ctx) {
         elapsedMs: elapsedMs,
         hasApiKey: !!apiKey,
         error: clipText(errMsg, 500),
-        raw: clipText(response.text, 1200),
+        raw: sanitizeDiagnosticText(response.text, 1200),
         message: '测试失败：HTTP ' + response.statusCode + ' · ' + clipText(errMsg, 200),
       }
     }
@@ -2335,7 +2355,7 @@ export function apply(ctx) {
         const proxyUrl = isLoopbackHostname(targetHost)
           ? ''
           : (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '')
-        const deadlineSignal = AbortSignal.timeout(budget)
+        const deadlineSignal = createDeadlineSignal(budget)
         const doRequest = (opts) => {
           const req = https.request(Object.assign({}, opts, { signal: deadlineSignal }), (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
