@@ -31,7 +31,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.36'
+const VERSION = '0.1.37'
 /** 新建供应商默认重试次数（写入 retryPolicy.maxRetries）。平台默认也是 2。 */
 const DEFAULT_PROVIDER_MAX_RETRIES = 2
 /** maxRetries 允许的最大值（几乎不设限，防御性上限）。 */
@@ -41,6 +41,13 @@ const TEST_TIMEOUT_MS = 10 * 60 * 1000
 const MAX_TEST_BYTES = 1024 * 1024
 /** 参考 deepseek-harness-model-config：用 models.dev 补全思考强度/上下文/视觉。 */
 const MODELS_DEV_URL = 'https://models.dev/api.json'
+/** 仓库根 api.json 的 GitHub raw 地址；国内源通过 gh-proxy.org 加速该快照。 */
+const MODELS_GITHUB_SNAPSHOT_URL = 'https://github.com/kingsunb/dsh-model-plus/raw/refs/heads/main/api.json'
+const MODELS_CN_PROXY_URL = 'https://gh-proxy.org/' + MODELS_GITHUB_SNAPSHOT_URL
+const CATALOG_SOURCES = [
+  { id: 'official', label: '官方 models.dev', url: MODELS_DEV_URL },
+  { id: 'china', label: '国内 GitHub 加速', url: MODELS_CN_PROXY_URL },
+]
 const MODELS_DEV_TIMEOUT_MS = 20000
 const MAX_MODELS_DEV_BYTES = 8 * 1024 * 1024
 /** 默认创意测试提示词（原文）。 */
@@ -2569,6 +2576,7 @@ export function apply(ctx) {
       defaultTestPrompt: DEFAULT_TEST_PROMPT,
       defaultTestMaxTokens: DEFAULT_TEST_MAX_TOKENS,
       modelsDevUrl: catalogUrl,
+      catalogSources: CATALOG_SOURCES.map((source) => Object.assign({}, source)),
       defaultModelsDevUrl: MODELS_DEV_URL,
       // 兼容旧字段名
       defaultModelsUrl: MODELS_DEV_URL,

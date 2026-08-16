@@ -372,6 +372,7 @@ window.__ModuleLoader__.load({
       const [okMsg, setOkMsg] = React.useState('')
       const [overwriteEfforts, setOverwriteEfforts] = React.useState(false)
       const [catalogUrl, setCatalogUrl] = React.useState('https://models.dev/api.json')
+      const [catalogSource, setCatalogSource] = React.useState('official')
       const [quickResult, setQuickResult] = React.useState(null)
       const [refreshBusy, setRefreshBusy] = React.useState(false)
       const [refreshError, setRefreshError] = React.useState('')
@@ -468,7 +469,10 @@ window.__ModuleLoader__.load({
         try {
           const b = await api.bootstrap()
           setBoot(b)
-          setCatalogUrl(b.modelsDevUrl || b.defaultModelsDevUrl || b.defaultModelsUrl || 'https://models.dev/api.json')
+          const nextCatalogUrl = b.modelsDevUrl || b.defaultModelsDevUrl || b.defaultModelsUrl || 'https://models.dev/api.json'
+          setCatalogUrl(nextCatalogUrl)
+          const source = (b.catalogSources || []).find((item) => item && item.url === nextCatalogUrl)
+          setCatalogSource(source ? source.id : 'custom')
           if (b.defaultProviderMaxRetries != null) {
             setAddMaxRetries((prev) => (prev === 2 || prev === '' || prev == null) ? b.defaultProviderMaxRetries : prev)
           }
@@ -982,7 +986,11 @@ window.__ModuleLoader__.load({
         try {
           const res = await api.saveCatalogUrl({ catalogUrl: catalogUrl })
           setOkMsg(res.message || '已保存目录地址')
-          if (res.catalogUrl) setCatalogUrl(res.catalogUrl)
+          if (res.catalogUrl) {
+            setCatalogUrl(res.catalogUrl)
+            const source = ((boot && boot.catalogSources) || []).find((item) => item && item.url === res.catalogUrl)
+            setCatalogSource(source ? source.id : 'custom')
+          }
           setBoot(await api.bootstrap())
         } catch (e) {
           setError(e && e.message ? e.message : String(e))
@@ -1914,15 +1922,38 @@ window.__ModuleLoader__.load({
         ),
 
         tab === 'sync' && React.createElement('div', { className: 'mp-card' },
-          React.createElement('div', { className: 'mp-field' },
-            React.createElement('span', { className: 'mp-label' }, '目录地址'),
-            React.createElement('input', {
-              className: 'mp-input',
-              value: catalogUrl,
-              disabled: busy || enrichBusy,
-              placeholder: 'https://models.dev/api.json',
-              onChange: (ev) => setCatalogUrl(ev.target.value),
-            }),
+          React.createElement('div', { className: 'mp-field-pair' },
+            React.createElement('div', { className: 'mp-field' },
+              React.createElement('span', { className: 'mp-label' }, '目录源'),
+              React.createElement('select', {
+                className: 'mp-select',
+                value: catalogSource,
+                disabled: busy || enrichBusy,
+                onChange: (ev) => {
+                  const id = ev.target.value
+                  setCatalogSource(id)
+                  const source = ((boot && boot.catalogSources) || []).find((item) => item && item.id === id)
+                  if (source && source.url) setCatalogUrl(source.url)
+                },
+              },
+              ((boot && boot.catalogSources) || [
+                { id: 'official', label: '官方 models.dev', url: 'https://models.dev/api.json' },
+              ]).map((source) => React.createElement('option', { key: source.id, value: source.id }, source.label)),
+              React.createElement('option', { value: 'custom' }, '自定义地址'),
+              ),
+              catalogSource === 'china' && React.createElement('span', { className: 'mp-field-hint' },
+                '国内源读取仓库根 api.json 的 GitHub 快照，经 gh-proxy.org 加速；快照会随插件仓库更新。'),
+            ),
+            React.createElement('div', { className: 'mp-field' },
+              React.createElement('span', { className: 'mp-label' }, '目录地址'),
+              React.createElement('input', {
+                className: 'mp-input',
+                value: catalogUrl,
+                disabled: busy || enrichBusy || catalogSource !== 'custom',
+                placeholder: 'https://models.dev/api.json',
+                onChange: (ev) => { setCatalogSource('custom'); setCatalogUrl(ev.target.value) },
+              }),
+            ),
           ),
           React.createElement('div', { className: 'mp-actions' },
             React.createElement('button', {
@@ -1933,8 +1964,11 @@ window.__ModuleLoader__.load({
             React.createElement('button', {
               type: 'button', className: 'mp-btn',
               disabled: busy || enrichBusy,
-              onClick: () => setCatalogUrl((boot && (boot.defaultModelsDevUrl || boot.defaultModelsUrl)) || 'https://models.dev/api.json'),
-            }, '恢复默认'),
+              onClick: () => {
+                setCatalogSource('official')
+                setCatalogUrl((boot && (boot.defaultModelsDevUrl || boot.defaultModelsUrl)) || 'https://models.dev/api.json')
+              },
+            }, '恢复官方源'),
           ),
           React.createElement('label', { className: 'mp-checkline' },
             React.createElement('input', {

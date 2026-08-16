@@ -5,7 +5,8 @@ DeepSeek Harness **模型 Plus** 仓库：可发布的 DSH Web 插件包。
 ## 布局
 
 ```text
-dsh-model-plus/   # 可发布的 DSH npm 插件包（@kingsunb/dsh-model-plus）
+api.json           # models.dev 目录快照，供 GitHub 国内加速源读取
+dsh-model-plus/     # 可发布的 DSH npm 插件包（@kingsunb/dsh-model-plus）
   lib/index.js      # host 半：注册 /api/plus/* HTTP 端点，读写 settings
   lib/client.js     # client 半：设置页「模型 Plus」UI（__ModuleLoader__ 工厂）
   cordis.patch.yml  # 把插件行插入 web profile 的 cordis 层
@@ -33,13 +34,13 @@ dsh plugin --profile web add link:$(pwd)/dsh-model-plus
 
 ## 同步源
 
-一键同步默认使用：
+同步设置提供三个选项：
 
-```text
-https://models.dev/api.json
-```
+- 官方源：`https://models.dev/api.json`
+- 国内 GitHub 加速源：`https://gh-proxy.org/https://github.com/kingsunb/dsh-model-plus/raw/refs/heads/main/api.json`
+- 自定义 HTTPS 地址
 
-按模型 id 补全思考强度 / 上下文 / maxTokens / 视觉。本地可按供应商再改。
+国内源读取仓库根的 `api.json` 快照；更新目录时，重新下载官方 `models.dev/api.json` 覆盖该文件并提交即可。目录按模型 id 补全思考强度 / 上下文 / maxTokens / 视觉，本地仍可按供应商再改。
 
 ## 友情链接
 

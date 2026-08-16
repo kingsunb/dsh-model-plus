@@ -25,6 +25,16 @@ dsh plugin --profile web add @kingsunb/dsh-model-plus
 
 Restart `dsh web`, then open **Settings → 模型 Plus**.
 
+## Catalog sources
+
+The sync settings page provides three choices:
+
+- **Official models.dev**: `https://models.dev/api.json`
+- **China GitHub acceleration**: `https://gh-proxy.org/https://github.com/kingsunb/dsh-model-plus/raw/refs/heads/main/api.json`
+- **Custom address**: any approved HTTPS catalog URL
+
+The China source serves the `api.json` snapshot committed at this repository root through `gh-proxy.org`. The official models.dev source remains the default.
+
 ## Architecture
 
 - **Host half** (`lib/index.js`): registers same-origin HTTP endpoints `/api/plus/*`
