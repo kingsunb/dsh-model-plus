@@ -31,7 +31,7 @@ export const inject = ['settings', 'webServer', 'timer']
 const NS = 'llm-pi-ai'
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const INPUTS = ['text', 'image']
-const VERSION = '0.1.37'
+const VERSION = '0.1.38'
 /** 新建供应商默认重试次数（写入 retryPolicy.maxRetries）。平台默认也是 2。 */
 const DEFAULT_PROVIDER_MAX_RETRIES = 2
 /** maxRetries 允许的最大值（几乎不设限，防御性上限）。 */
@@ -50,8 +50,8 @@ const CATALOG_SOURCES = [
 ]
 const MODELS_DEV_TIMEOUT_MS = 20000
 const MAX_MODELS_DEV_BYTES = 8 * 1024 * 1024
-/** 默认创意测试提示词（原文）。 */
-const DEFAULT_TEST_PROMPT = 'SVG绘制一个鹈鹕骑自行车的2D动画'
+/** 默认测试提示词：一道生活常识推理题（开车 vs 走路 63 米）。 */
+const DEFAULT_TEST_PROMPT = '我要去洗车，洗车店离家63米我是开车去还是走路去。'
 /** SVG 动画输出较长；推理模型还会先占 reasoning_content，默认 16k。 */
 const DEFAULT_TEST_MAX_TOKENS = 16384
 /** 与 dsh-llm-pi-ai supportedProtocols() 对齐：手写 gateway 可声明的协议。 */
